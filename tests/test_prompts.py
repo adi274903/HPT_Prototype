@@ -135,6 +135,21 @@ def test_decision_prompt_compacts_and_serializes_candidates():
     assert '"use_codes": "cpt"' in prompt
 
 
+def test_categorizer_prompt_covers_the_terse_cost_phrasing():
+    """The two reported failures, neither of which resembled any other example.
+
+    "Cost of colonoscopy at UPMC Presby?" and "How much would an X-ray cost?" both
+    came back with an empty medical list, while the full-sentence examples — and a
+    query matching one verbatim — extracted correctly. The prompt now shows the
+    terse shape.
+    """
+    prompt = build_categorizer_prompt("q")
+
+    assert '"medical": ["colonoscopy"]' in prompt
+    assert '"medical": ["X-ray"]' in prompt
+    assert "terse and noun-only" in prompt
+
+
 def test_decision_prompt_caps_candidates_at_eight():
     categorization = {
         "medical": ["x"],

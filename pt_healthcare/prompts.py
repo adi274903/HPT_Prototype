@@ -122,6 +122,28 @@ def build_categorizer_prompt(
     Every category is filled from the query text. Only the hospital and insurer
     values additionally get matched against the reference lists.
 
+    Query: Cost of colonoscopy at UPMC Presby?
+    Output:
+    {{
+      "medical": ["colonoscopy"],
+      "hospital": ["UPMC Presby"],
+      "insurer": [],
+      "medication" : []
+    }}
+
+    Query: How much would an X-ray cost?
+    Output:
+    {{
+      "medical": ["X-ray"],
+      "hospital": [],
+      "insurer": [],
+      "medication" : []
+    }}
+
+    Those last two are terse and noun-only. They still name a service, so the
+    service still belongs in medical — a short or clipped phrasing is not a reason
+    to leave the category empty.
+
     Now classify this query:
 
     Query: {user_query}
