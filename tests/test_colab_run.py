@@ -464,12 +464,28 @@ def test_polling_transport_reports_new_lines_incrementally():
         base = ui.local_url.rstrip("/")
         run_id = _post_json(base + "/api/run", {"query": "colonoscopy"})["run"]
 
-        first = _get_json(f"{base}/api/poll?run={run_id}&since=0")
-        assert first["next"] == len(first["lines"])
+        # Wait for the run to finish first: while it is still going, more lines
+        # legitimately appear between two polls and the counts race.
+        deadline = time.time() + 10
+        final = None
+        while time.time() < deadline:
+            final = _get_json(f"{base}/api/poll?run={run_id}&since=0")
+            if final["state"] != "running":
+                break
+            time.sleep(0.05)
 
-        second = _get_json(f"{base}/api/poll?run={run_id}&since={first['next']}")
-        assert second["lines"] == []          # nothing new past the high-water mark
-        assert second["next"] >= first["next"]
+        assert final is not None and final["state"] == "done"
+        assert final["next"] == len(final["lines"])
+
+        # `since` is an absolute high-water mark: past it, nothing comes back.
+        beyond = _get_json(f"{base}/api/poll?run={run_id}&since={final['next']}")
+        assert beyond["lines"] == []
+        assert beyond["next"] == final["next"]
+
+        # And it really does slice, rather than always returning everything.
+        partial = _get_json(f"{base}/api/poll?run={run_id}&since=1")
+        assert partial["lines"] == final["lines"][1:]
+        assert partial["next"] == final["next"]
     finally:
         ui.stop()
 

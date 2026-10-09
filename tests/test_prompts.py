@@ -18,6 +18,25 @@ def test_categorizer_prompt_embeds_query_and_schema():
     assert "Return ONLY valid JSON" in prompt
 
 
+def test_every_model_call_sets_an_explicit_token_budget():
+    """The categorizer must not inherit the pipe's 256-token default.
+
+    MedGemma spends that on its <unused94>thought block before reaching the JSON,
+    so a verbose query gets truncated into a response with no JSON at all.
+    """
+    import inspect
+
+    from pt_healthcare import config
+    from pt_healthcare.llm import MedGemmaEngine
+
+    source = inspect.getsource(MedGemmaEngine)
+
+    assert source.count("max_new_tokens=config.max_new_tokens()") == 3, (
+        "categorize/decide/answer must all pass an explicit budget"
+    )
+    assert config.max_new_tokens() > 256
+
+
 def test_decision_prompt_compacts_and_serializes_candidates():
     categorization = {
         "medical": ["diagnostic mammogram"],

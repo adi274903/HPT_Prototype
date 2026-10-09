@@ -28,7 +28,16 @@ class MedGemmaEngine:
     # 1. Entity extraction  (notebook cell 15)
     # ------------------------------------------------------------------
     def categorize(self, user_query: str) -> str:
-        """Run the categorizer prompt and return the raw assistant text."""
+        """Run the categorizer prompt and return the raw assistant text.
+
+        ``max_new_tokens`` is passed explicitly. The pipe's own default is 256,
+        and MedGemma is a thinking model: it emits ``<unused94>thought …`` before
+        the JSON, so a verbosely-reasoned query can spend the entire budget on the
+        thought block and get cut off before any JSON exists — surfacing later as
+        "Could not find a JSON object in the model response". The prototype hit
+        this too: its log shows ``max_new_tokens (=256)`` for this call and
+        ``(=4096)`` for the other two.
+        """
         prompt = build_categorizer_prompt(user_query)
 
         messages = [
@@ -40,7 +49,10 @@ class MedGemmaEngine:
             },
         ]
 
-        output = self.pipe(text=messages)
+        output = self.pipe(
+            text=messages,
+            max_new_tokens=config.max_new_tokens(),
+        )
 
         return output[0]["generated_text"][-1]["content"]
 
