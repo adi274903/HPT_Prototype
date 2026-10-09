@@ -216,13 +216,17 @@ def build_intent_prompt(user_query: str) -> str:
     Only used when the lexical cues find nothing — this is the tie-breaker, not
     the router.
     """
-    return f"""You are routing a patient's question to one of two capabilities.
+    return f"""Route a patient's question to one of three capabilities.
 
-    price  - what something will cost, what a bill means, what an amount covers.
-    lookup - what a billing code (CPT or HCPCS) means, or what a procedure, test
-             or condition is.
+    price   - what something will cost, what a bill means, what an amount covers,
+              for a named hospital, plan or procedure.
+    lookup  - the meaning of a specific billing code (CPT or HCPCS) that the
+              question itself names, such as "what is 45378".
+    explain - what a procedure, test or condition is, in general terms, when no
+              code is named and no cost is asked about.
 
-    Answer with exactly one word: price or lookup.
+    Answer with exactly one word: price, lookup or explain. Do not explain your
+    choice.
 
     Question: {user_query}
 

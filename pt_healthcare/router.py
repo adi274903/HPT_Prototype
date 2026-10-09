@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, List, Mapping, Optional
 
+from .parsing import strip_thought
+
 PRICE = "price"
 LOOKUP = "lookup"
 EXPLAIN = "explain"
@@ -192,9 +194,12 @@ def classify(
 def model_intent(engine: Optional[Any], query: str) -> Optional[Intent]:
     """Ask the model to break the tie, or ``None`` if it cannot.
 
-    Returns ``None`` for a missing engine, an exception, or output naming no
-    known tool. Separators are normalised first, so "code lookup" and
-    "code_lookup" both read as the tool name.
+    Returns ``None`` for a missing engine, an exception, or an answer that names
+    no tool *or more than one*. That last case matters: MedGemma's reasoning trace
+    routinely names every option it is weighing, so matching against the whole
+    response finds the rejected ones too. Only the text after ``<unused95>``
+    counts, matches must be whole words, and an ambiguous answer defers to the
+    caller's default rather than guessing.
     """
     if engine is None:
         return None
@@ -204,15 +209,18 @@ def model_intent(engine: Optional[Any], query: str) -> Optional[Intent]:
     except Exception:
         return None
 
-    text = str(raw or "").lower().replace("-", "_").replace(" ", "_")
+    answer = strip_thought(raw).lower()
 
-    for name in TOOL_NAMES:
-        if name in text:
-            return Intent(
-                name,
-                extract_codes(query),
-                "model hint",
-                source="model",
-            )
+    found = [
+        name for name in TOOL_NAMES if re.search(rf"\b{re.escape(name)}\b", answer)
+    ]
 
-    return None
+    if len(found) != 1:
+        return None
+
+    return Intent(
+        found[0],
+        extract_codes(query),
+        "model hint",
+        source="model",
+    )

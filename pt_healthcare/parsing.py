@@ -12,7 +12,30 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import config
 
-__all__ = ["parse_json_output", "compact_candidates"]
+__all__ = ["parse_json_output", "compact_candidates", "strip_thought"]
+
+#: MedGemma closes its reasoning trace with this token; everything before it is
+#: deliberation rather than output.
+_THOUGHT_END = "<unused95>"
+
+
+def strip_thought(raw_output: Any) -> str:
+    """Return only what the model said *after* its reasoning trace.
+
+    MedGemma opens its turn with ``<unused94>thought … <unused95>``. The thought
+    block discusses the very options it is choosing between, so keyword matching
+    against the whole response matches the *reasoning* and finds the options that
+    were rejected — which is how "What is diagnostic mammography?" once reached
+    the price path: the model wrote "not its price" while thinking.
+
+    Falls back to stripping the control tokens when no end marker is present.
+    """
+    text = str(raw_output or "")
+
+    if _THOUGHT_END in text:
+        return text.split(_THOUGHT_END, 1)[1].strip()
+
+    return re.sub(r"<unused\d+>", "", text).strip()
 
 
 def parse_json_output(raw_output: Any) -> Dict[str, Any]:

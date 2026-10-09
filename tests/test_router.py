@@ -110,6 +110,64 @@ def test_model_output_naming_no_tool_falls_back():
     assert intent.source == "default"
 
 
+def test_a_thought_block_naming_price_does_not_route_to_price():
+    """The real failure: the reasoning named 'price' while rejecting it.
+
+    "What is diagnostic mammography?" reached the price path because the thought
+    block said "not its price" and matching ran over the whole response.
+    """
+    reply = (
+        "<unused94>thought\nThe question asks what diagnostic mammography is. "
+        "It is not a price question, and no code is named, so it is not a lookup."
+        "<unused95>explain"
+    )
+
+    intent = router.classify("What is diagnostic mammography?", engine=FakeEngine(reply))
+
+    assert intent.tool == router.EXPLAIN
+    assert intent.source == "model"
+
+
+def test_an_ambiguous_model_answer_defers_to_the_default():
+    """Naming two tools is not a decision; the caller's default is safer."""
+    reply = "<unused94>thought\nweighing lookup against explain<unused95>lookup or explain"
+
+    intent = router.classify("tell me about colonoscopies", engine=FakeEngine(reply))
+
+    assert intent.tool == router.EXPLAIN
+    assert intent.source == "default"
+
+
+def test_a_rambling_reply_naming_two_tools_defers_to_the_default():
+    """With no answer marker there is nothing to trust, so the default stands."""
+    reply = "<unused94>thought\nperhaps price, perhaps lookup"  # no <unused95>
+
+    intent = router.classify("tell me about colonoscopies", engine=FakeEngine(reply))
+
+    assert intent.source == "default"
+
+
+def test_strip_thought_keeps_only_what_follows_the_trace():
+    from pt_healthcare.parsing import strip_thought
+
+    raw = "<unused94>thought\nweighing price against lookup<unused95>explain"
+
+    assert strip_thought(raw) == "explain"
+
+
+def test_strip_thought_without_a_marker_just_drops_the_tokens():
+    from pt_healthcare.parsing import strip_thought
+
+    assert strip_thought("<unused94>price") == "price"
+
+
+def test_strip_thought_of_nothing_is_empty():
+    from pt_healthcare.parsing import strip_thought
+
+    assert strip_thought(None) == ""
+    assert strip_thought("") == ""
+
+
 def test_extract_codes_handles_every_code_shape():
     assert router.extract_codes("what is 45378?") == ["45378"]
     assert router.extract_codes("and G0206?") == ["G0206"]
