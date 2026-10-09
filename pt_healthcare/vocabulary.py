@@ -210,6 +210,21 @@ def resolve_to_vocabulary(
             resolved.append(by_key[contained[0]])
             continue
 
+        if len(contained) > 1:
+            # An abbreviation shared by several entries — "UPMC Presby" against
+            # "...Presbyterian Shadyside" and "...Presbyterian South" — is
+            # genuinely ambiguous, and the fuzzy pass below must not be allowed to
+            # decide it: SequenceMatcher's ratio penalises length, so it prefers
+            # the *shorter* candidate and returned "South" for a term that names
+            # neither. That is an arbitrary pick, and a wrong facility filter
+            # silently reports another hospital's prices as the user's.
+            #
+            # Leaving the term intact is the honest option: the substring filter
+            # downstream then matches every candidate, which is a superset rather
+            # than a wrong single choice.
+            resolved.append(term)
+            continue
+
         scored = sorted(
             (
                 (difflib.SequenceMatcher(None, key, entry_key).ratio(), entry_key)
