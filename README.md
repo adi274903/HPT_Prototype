@@ -95,7 +95,7 @@ cp .env.example .env        # then edit
 
 | Variable              | Default                                | Meaning                          |
 | --------------------- | -------------------------------------- | -------------------------------- |
-| `HUGGINGFACE_API_KEY` | —                                      | HF token for gated model access  |
+| `HUGGINGFACE_API_KEY` | —                                      | HF token for gated model access (`HF_TOKEN` / `HUGGINGFACE_HUB_TOKEN` also accepted) |
 | `PT_MRF_CSV`          | `everyUPMCmrf_clean.csv`               | cleaned MRF CSV path             |
 | `PT_QDRANT_PATH`      | `New_PT_DB`                            | local Qdrant store directory     |
 | `PT_TOP_K`            | `10`                                   | candidates retrieved per code set |

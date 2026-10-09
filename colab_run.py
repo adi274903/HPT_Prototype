@@ -163,18 +163,32 @@ def load_env(dotenv_path: str = ".env") -> None:
 
 
 def hf_token() -> Optional[str]:
-    """Resolve the Hugging Face token from env, ``.env``, or Colab secrets."""
-    token = os.getenv("HUGGINGFACE_API_KEY")
+    """Resolve the Hugging Face token from env, ``.env``, or Colab secrets.
+
+    Checks ``HUGGINGFACE_API_KEY``, then ``HF_TOKEN`` / ``HUGGINGFACE_HUB_TOKEN``
+    (the names huggingface_hub reads on its own), then Colab secrets under any of
+    those names. ``build_pipeline()`` calls ``load_env()`` first, so a ``.env``
+    in the working directory is already loaded by the time this runs.
+    """
+    token = config.hf_token_from_env()
 
     if token:
         return token
 
     try:
         from google.colab import userdata
-
-        return userdata.get("HUGGINGFACE_API_KEY")
     except Exception:
         return None
+
+    for name in config.HF_TOKEN_ENV_VARS:
+        try:
+            value = userdata.get(name)
+        except Exception:
+            continue
+        if value:
+            return value
+
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import pytest
 
 import colab_run
 from colab_run import Tunnel, UIServer, check_ui_assets, import_pt_serve, start_tunnel
+from pt_healthcare import config
 
 
 def test_ui_assets_are_vendored():
@@ -99,3 +100,46 @@ def test_default_paths_match_the_notebook():
     assert paths["db_archive"].endswith("New_PT_DB_Backups/New_PT_DB.tar.gz")
     assert paths["qdrant_path"] == "/content/New_PT_DB"
     assert paths["mrf_csv"].endswith("everyUPMCmrf_clean (1).csv")
+
+
+def _clear_token_env(monkeypatch):
+    for name in config.HF_TOKEN_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_hf_token_reads_huggingface_api_key(monkeypatch):
+    _clear_token_env(monkeypatch)
+    monkeypatch.setenv("HUGGINGFACE_API_KEY", "hf_primary")
+
+    assert colab_run.hf_token() == "hf_primary"
+
+
+def test_hf_token_accepts_the_hf_token_alias(monkeypatch):
+    """A .env using HF_TOKEN (huggingface_hub's own name) must still work."""
+    _clear_token_env(monkeypatch)
+    monkeypatch.setenv("HF_TOKEN", "hf_alias")
+
+    assert colab_run.hf_token() == "hf_alias"
+
+
+def test_hf_token_accepts_the_hub_token_alias(monkeypatch):
+    _clear_token_env(monkeypatch)
+    monkeypatch.setenv("HUGGINGFACE_HUB_TOKEN", "hf_hub")
+
+    assert colab_run.hf_token() == "hf_hub"
+
+
+def test_hf_token_prefers_huggingface_api_key(monkeypatch):
+    _clear_token_env(monkeypatch)
+    monkeypatch.setenv("HF_TOKEN", "alias")
+    monkeypatch.setenv("HUGGINGFACE_API_KEY", "primary")
+
+    assert colab_run.hf_token() == "primary"
+
+
+def test_config_exposes_the_same_resolution(monkeypatch):
+    _clear_token_env(monkeypatch)
+    assert config.hf_token_from_env() is None
+
+    monkeypatch.setenv("HF_TOKEN", "alias")
+    assert config.hf_token_from_env() == "alias"

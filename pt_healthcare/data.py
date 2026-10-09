@@ -21,12 +21,13 @@ def login_huggingface(token: Optional[str] = None) -> None:
     """Authenticate against Hugging Face for the gated MedGemma/MedTE models."""
     import huggingface_hub
 
-    token = token or os.getenv(config.HF_TOKEN_ENV)
+    token = token or config.hf_token_from_env()
 
     if not token:
         raise RuntimeError(
-            f"Missing Hugging Face token. Set {config.HF_TOKEN_ENV} in your "
-            "environment/.env (see .env.example)."
+            "Missing Hugging Face token. Set one of "
+            f"{', '.join(config.HF_TOKEN_ENV_VARS)} in your environment or .env "
+            "(see .env.example)."
         )
 
     huggingface_hub.login(token)
