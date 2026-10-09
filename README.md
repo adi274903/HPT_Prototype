@@ -34,20 +34,21 @@ PT_Healthcare/
 │   ├── pricing.py            # sql_answer(): filter the MRF DataFrame
 │   ├── pipeline.py           # HealthcarePricingPipeline: the 7-step orchestration
 │   └── cli.py                # command-line entry point
+├── colab_run.py              # Google Colab runner: pip/drive/tar glue + CLI
 ├── scripts/download_db.sh    # fetch + extract the Qdrant snapshot
 ├── examples/run_pipeline.py  # minimal end-to-end example
 ├── tests/                    # pytest suite for every pure component
-└── notebooks/                # original prototype notebook (provenance)
+└── notebooks/                # original prototype + Colab driver notebook
 ```
 
 ### How the notebook maps to the package
 
 | Notebook cell(s)                 | Package module                |
 | -------------------------------- | ----------------------------- |
-| `pip install ...`                | `requirements.txt`            |
-| imports / `drive.mount` / HF login | `data.py` (`login_huggingface`) |
+| `pip install ...`                | `requirements.txt` / `colab_run.install_dependencies()` |
+| imports / `drive.mount` / HF login | `data.py` + `colab_run.py` |
 | `load_models()`                  | `models.py`                   |
-| DB download + `!tar -xzf`        | `data.py` + `scripts/download_db.sh` |
+| DB download + `!cp` + `!tar -xzf` | `colab_run.stage_db()` + `scripts/download_db.sh` |
 | `QdrantClient`, collection stats | `data.py`                     |
 | `pd.read_csv(mrf...)`            | `data.py` (`load_mrf_data`)   |
 | `TOP_K = 10`                     | `config.py`                   |
@@ -97,6 +98,56 @@ cp .env.example .env        # then edit
 | `PT_MRF_CSV`          | `everyUPMCmrf_clean.csv`               | cleaned MRF CSV path             |
 | `PT_QDRANT_PATH`      | `New_PT_DB`                            | local Qdrant store directory     |
 | `PT_TOP_K`            | `10`                                   | candidates retrieved per code set |
+
+## Run in Google Colab
+
+All the Colab-specific glue (the `!pip install` cell, `drive.mount`, and the
+`!cp` + `!tar -xzf` snapshot staging) lives in **`colab_run.py`** — one
+self-contained entry point you can call from a Colab cell.
+
+Open `notebooks/HPT_colab.ipynb` (Runtime → GPU), or do it manually:
+
+```python
+# 1. get the code (equivalent to the notebook's !pip install cell)
+!git clone https://github.com/adi274903/HPT_Prototype /content/HPT_Prototype
+%cd /content/HPT_Prototype
+!pip install -q -r requirements.txt
+
+# 2. mount Drive + stage the Qdrant snapshot (drive.mount + cp + tar -xzf)
+import colab_run
+colab_run.mount_drive()
+colab_run.stage_db()               # -> /content/New_PT_DB
+
+# 3. load models + data
+pipeline = colab_run.setup(mount=False, stage=False)
+
+# 4. ask
+result = pipeline.run(
+    "What might a diagnostic mammogram cost at UPMC Presbyterian "
+    "with UPMC Health Plan?"
+)
+print(result["answer"])
+```
+
+One-liner instead of steps 2–3:
+
+```python
+import colab_run
+result = colab_run.run("What might a diagnostic mammogram cost at UPMC Presbyterian?")
+```
+
+From a shell cell, this runs the notebook's three validation queries end-to-end:
+
+```bash
+!python colab_run.py
+```
+
+`colab_run.py` uses the same Drive paths the prototype did
+(`MyDrive/New_PT_DB_Backups/New_PT_DB.tar.gz` and
+`MyDrive/Price_Transparency/datasets/everyUPMCmrf_clean (1).csv`) and resolves
+the HF token from the environment, a `.env`, or Colab secrets
+(`HUGGINGFACE_API_KEY`). Every path can be overridden — see
+`python colab_run.py --help`.
 
 ## Run
 
