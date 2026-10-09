@@ -3,12 +3,15 @@
 What the patient asks decides *which* capability runs; the capabilities
 themselves are tools. There are two:
 
-* ``price``  — what something will cost. The body of this tool is
+* ``price``   — what something will cost. The body of this tool is
   ``HealthcarePricingPipeline``, the existing 7-step orchestration, unchanged.
-* ``lookup`` — what a billing code means, or what a procedure is. One tool for
-  both, because "what is CPT 45378" and "explain diagnostic mammography" are the
-  same retrieval in different clothing: descriptors from the code index, then an
-  explanation grounded in them.
+* ``lookup``  — what a *specific* billing code means. The query named a code, so
+  the descriptor is fetched exactly from the index and the answer is grounded in
+  it. Never from memory: CPT is reissued every January and a remembered
+  definition may be wrong.
+* ``explain`` — a general question about a procedure, test or condition, with no
+  code named. Answered straight from MedGemma, which is a clinical model and knows
+  this material. No retrieval happens, so there is no query vector to get wrong.
 
 Selection is deterministic first. Choosing the wrong tool produces a
 confidently wrong-shaped answer, so this must not depend on sampling from a 4B
@@ -24,9 +27,10 @@ from typing import Any, List, Mapping, Optional
 
 PRICE = "price"
 LOOKUP = "lookup"
+EXPLAIN = "explain"
 
 #: Every tool name a classifier may return.
-TOOL_NAMES = (PRICE, LOOKUP)
+TOOL_NAMES = (PRICE, LOOKUP, EXPLAIN)
 
 #: A request about money, in the words patients use.
 PRICE_CUES = (
@@ -164,7 +168,7 @@ def classify(
 
     ``engine`` is optional and only consulted when the lexical pass finds no cue
     at all — the resident case, where rules have nothing to go on. A model that
-    is missing, broken or nonsensical degrades to the ``lookup`` default rather
+    is missing, broken or nonsensical degrades to the ``explain`` default rather
     than raising: a routing failure must not take down the request.
     """
     lexical = lexical_intent(query, entities)
@@ -178,7 +182,7 @@ def classify(
         return hinted
 
     return Intent(
-        LOOKUP,
+        EXPLAIN,
         [],
         "no price, code or facility cue",
         source="default",

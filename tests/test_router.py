@@ -40,10 +40,11 @@ def test_price_wording_beats_a_code():
     assert intent.codes == ["45378"]
 
 
-def test_explaining_a_procedure_routes_to_lookup():
+def test_explaining_a_procedure_routes_to_explain():
+    """No code named, so there is nothing to ground against — answer directly."""
     intent = router.classify("can you explain me what is diagnostic mammography")
 
-    assert intent.tool == router.LOOKUP
+    assert intent.tool == router.EXPLAIN
 
 
 def test_naming_a_facility_routes_to_price():
@@ -67,13 +68,13 @@ def test_word_boundaries_stop_a_false_price_cue():
     """"fee" sits inside "feeling"; a substring match would misroute this."""
     intent = router.classify("I am feeling anxious about getting a colonoscopy")
 
-    assert intent.tool == router.LOOKUP
+    assert intent.tool == router.EXPLAIN
 
 
-def test_no_cue_without_an_engine_falls_back_to_lookup():
+def test_no_cue_without_an_engine_falls_back_to_explain():
     intent = router.classify("tell me about colonoscopies")
 
-    assert intent.tool == router.LOOKUP
+    assert intent.tool == router.EXPLAIN
     assert intent.source == "default"
 
 
@@ -98,14 +99,14 @@ def test_a_broken_model_degrades_to_the_default():
     """A routing failure must not take down the request."""
     intent = router.classify("tell me about colonoscopies", engine=BrokenEngine())
 
-    assert intent.tool == router.LOOKUP
+    assert intent.tool == router.EXPLAIN
     assert intent.source == "default"
 
 
 def test_model_output_naming_no_tool_falls_back():
     intent = router.classify("tell me about colonoscopies", engine=FakeEngine("banana"))
 
-    assert intent.tool == router.LOOKUP
+    assert intent.tool == router.EXPLAIN
     assert intent.source == "default"
 
 

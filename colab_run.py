@@ -86,7 +86,7 @@ from pt_healthcare.models import load_models  # noqa: E402
 from pt_healthcare.orchestrator import Orchestrator  # noqa: E402
 from pt_healthcare.pipeline import HealthcarePricingPipeline  # noqa: E402
 from pt_healthcare.retrieval import CodeRetriever  # noqa: E402
-from pt_healthcare.tools import LookupTool, PriceTool  # noqa: E402
+from pt_healthcare.tools import ExplainTool, LookupTool, PriceTool  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Colab defaults — exactly the paths the original notebook used
@@ -436,13 +436,15 @@ def build_orchestrator(
 ) -> Orchestrator:
     """Wire the tools into an orchestrator, reusing ``build_pipeline``'s handles.
 
-    Two tools, one per kind of question:
+    Three tools, one per kind of question:
 
-    - ``price``  — the patient asks what something costs. The 7-step
+    - ``price``   — the patient asks what something costs. The 7-step
       orchestration is this tool's body, unchanged.
-    - ``lookup`` — the patient names a CPT/HCPCS code, or asks what a procedure
-      is. Descriptors come from the code index; a code the index does not hold is
-      reported as absent rather than described from memory.
+    - ``lookup``  — the patient names a CPT/HCPCS code. The descriptor is fetched
+      exactly from the code index; a code the index does not hold is reported as
+      absent rather than described from memory.
+    - ``explain`` — a general question about a procedure, with no code named.
+      Answered straight from MedGemma with no retrieval.
 
     Routing is ``pt_healthcare.router``: rules first, and the model only to break
     a tie when the wording gives no cue. Events are emitted as each stage produces
@@ -464,6 +466,7 @@ def build_orchestrator(
         tools=[
             PriceTool(pipeline),
             LookupTool(pipeline.retriever, pipeline.engine),
+            ExplainTool(pipeline.engine),
         ],
         engine=pipeline.engine,
     )

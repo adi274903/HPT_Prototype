@@ -4,6 +4,7 @@ from pt_healthcare.prompts import (
     build_answer_prompt,
     build_categorizer_prompt,
     build_decision_prompt,
+    build_general_prompt,
 )
 
 
@@ -111,6 +112,15 @@ def test_every_model_call_is_deterministic():
     assert source.count("do_sample=False") == 5, (
         "every model call must be deterministic"
     )
+
+
+def test_general_prompt_says_no_lookup_happened():
+    """The model must not imply it searched when it did not."""
+    prompt = build_general_prompt("what is a colonoscopy?")
+
+    assert "No index lookup was performed" in prompt
+    assert "Never guess or assert a specific billing code" in prompt
+    assert "what is a colonoscopy?" in prompt
 
 
 def test_decision_prompt_compacts_and_serializes_candidates():

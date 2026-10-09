@@ -16,6 +16,7 @@ from .prompts import (
     build_categorizer_prompt,
     build_decision_prompt,
     build_explain_prompt,
+    build_general_prompt,
     build_intent_prompt,
 )
 
@@ -147,9 +148,20 @@ class MedGemmaEngine:
     # ------------------------------------------------------------------
     # 5. Explanation  (code definitions and general procedure questions)
     # ------------------------------------------------------------------
-    def explain(self, user_query: str, context: str = "") -> str:
-        """Explain a code or a procedure, grounded in ``context``."""
-        prompt = build_explain_prompt(user_query, context)
+    def explain(self, user_query: str, context: Optional[str] = None) -> str:
+        """Explain a code, or answer a general question.
+
+        ``context`` is the retrieved descriptor text when the query named a code:
+        the answer is grounded in it and the prompt forbids describing a code the
+        index does not hold. Pass ``None`` for a general question — no lookup
+        happened, and the prompt says so, so the model answers from its own
+        clinical knowledge instead of claiming to have searched.
+        """
+        prompt = (
+            build_general_prompt(user_query)
+            if context is None
+            else build_explain_prompt(user_query, context)
+        )
 
         messages = [
             {

@@ -257,20 +257,28 @@ one payload contract regardless of transport.
 Verified against the front-end's own suite (259 checks) with both the polling
 server and its mock backend.
 
-## Two tools, one orchestrator
+## Three tools, one orchestrator
 
 A patient query is routed to a tool, and each tool owns one kind of answer.
 
 | tool | question it answers | body |
 |---|---|---|
 | `price` | "what might a mammogram cost at UPMC with Highmark?" | `HealthcarePricingPipeline` — the 7-step orchestration, **unchanged** |
-| `lookup` | "what is CPT 45378?" / "explain diagnostic mammography" | descriptors from the code index, then an explanation grounded in them |
+| `lookup` | "what is CPT 45378?" | exact descriptor fetch from the code index, then an answer grounded in it |
+| `explain` | "explain diagnostic mammography" | MedGemma directly, **no retrieval** |
 
-`lookup` handles both cases because they are the same retrieval twice over: an
-exact descriptor fetch when the query names a code, a semantic search when it
-describes a procedure. A code the index does not hold is reported as absent rather
-than described from memory — this store is missing roughly a third of its HCPCS
-codes, and billing codes are reissued every January.
+`lookup` is the only path that touches the index, and only when the query actually
+named a code — a payload-filtered point fetch, not a semantic search, so you get
+*that* code's definition rather than its nearest neighbours. A code the index does
+not hold is reported as absent rather than described from memory: this store is
+missing roughly a third of its HCPCS codes, and CPT is reissued every January.
+
+`explain` deliberately retrieves nothing. MedGemma is a clinical model and knows
+what a diagnostic mammogram is; a question with no code in it has nothing in the
+index to ground against, so a search would only add latency. Skipping it also
+removes a failure mode: embedding a conversational question ("can you explain me
+what is diagnostic mammography") yields a far worse query vector than embedding an
+extracted term, and the price path never embeds raw text for exactly that reason.
 
 ### Routing is rules first, the model second
 
@@ -279,11 +287,12 @@ codes, and billing codes are reissued every January.
 1. **price wording** (`cost`, `how much`, `billed`, `deductible`, …) — wins even
    when a code is present, so "how much does 45378 cost at UPMC" prices rather
    than defines;
-2. **a bare CPT/HCPCS code** — `\d{5}`, `[A-Z]\d{4}`, `\d{4}[FT]`;
+2. **a bare CPT/HCPCS code** — `\d{5}`, `[A-Z]\d{4}`, `\d{4}[FT]` — routes to
+   `lookup`;
 3. **a named facility or payer** — naming your hospital or plan is a price signal
    even without the word "cost";
 4. **nothing matched** — the model breaks the tie, and if it is missing, broken or
-   nonsensical the default is `lookup`.
+   nonsensical the default is `explain`.
 
 The model is the tie-breaker, not the router. The categorizer was silently
 sampling; putting tool selection in the model's hands would be that same bug at

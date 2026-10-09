@@ -229,6 +229,35 @@ def build_intent_prompt(user_query: str) -> str:
     Answer:"""
 
 
+def build_general_prompt(user_query: str) -> str:
+    """A general question about a procedure, test or condition.
+
+    No index lookup happens on this path, so the prompt says so explicitly: the
+    model must not claim to have looked anything up, must not guess a code, and
+    must not quote a price it has no data for.
+    """
+    return f"""You are a healthcare navigation assistant answering a patient's
+    general question about a procedure, test, condition or billing term.
+
+    Rules:
+    - Answer from your own clinical knowledge. No index lookup was performed for
+      this question, so do not claim to have looked anything up.
+    - Say that this is general information, not advice about their situation.
+    - Never guess or assert a specific billing code. If the patient wants a code,
+      tell them this service can look up a code they name; if they want a price,
+      it can price a procedure at a named hospital and plan.
+    - Never quote or estimate a price; you have no price data here.
+    - Never advise the patient on their own care or say whether a procedure suits
+      them. Point them to their clinician for anything about their own situation.
+    - Keep it clear and patient-friendly, and short.
+
+    Patient question:
+    {user_query}
+
+    Answer:
+    """
+
+
 def build_explain_prompt(user_query: str, context: str) -> str:
     """Explain a code or a procedure, grounded in whatever the index returned.
 

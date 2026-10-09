@@ -31,15 +31,15 @@ def test_a_price_question_goes_to_the_price_tool():
     assert price.calls and not lookup.calls
 
 
-def test_a_definition_goes_to_the_lookup_tool():
-    price, lookup = FakeTool("price"), FakeTool("lookup")
+def test_a_procedure_question_goes_to_the_explain_tool():
+    price, lookup, explain = FakeTool("price"), FakeTool("lookup"), FakeTool("explain")
 
-    out = Orchestrator([price, lookup]).run(
+    out = Orchestrator([price, lookup, explain]).run(
         "can you explain me what is diagnostic mammography"
     )
 
-    assert out["tool"] == "lookup"
-    assert lookup.calls and not price.calls
+    assert out["tool"] == "explain"
+    assert explain.calls and not price.calls and not lookup.calls
 
 
 def test_a_bare_code_goes_to_the_lookup_tool_with_the_code():

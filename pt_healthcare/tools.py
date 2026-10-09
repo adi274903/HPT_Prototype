@@ -1,14 +1,18 @@
 """The capabilities the orchestrator can run, as tools.
 
-Two tools, each answering one kind of question:
+Three tools, each answering one kind of question:
 
 * :class:`PriceTool` — what something costs. Its body is
   ``HealthcarePricingPipeline``, the existing 7-step orchestration, untouched.
   Nothing here reimplements it; the tool is a wrapper so the orchestrator can
   treat pricing like any other capability.
-* :class:`LookupTool` — what a billing code means, or what a procedure is. One
-  tool for both, because they are the same retrieval twice over: descriptors from
-  the code index, then an explanation grounded in them.
+* :class:`LookupTool` — what a *specific* billing code means. The query named a
+  code, so the descriptor is fetched exactly from the index and the answer is
+  grounded in it. A code the index does not hold is reported as absent rather than
+  described from memory.
+* :class:`ExplainTool` — a general question about a procedure, test or condition,
+  with no code named. No retrieval: MedGemma knows this material, and there is no
+  code to ground against.
 
 Each tool emits events as it produces data, so a consumer can render a block the
 moment it has content rather than waiting for the run to finish.
@@ -84,25 +88,19 @@ class PriceTool(Tool):
 
 
 class LookupTool(Tool):
-    """Explain a billing code, or find and explain the codes for a procedure.
+    """Explain a billing code the query named, grounded in the code index.
 
-    Two ways in:
+    The descriptor is fetched exactly — a payload-filtered point lookup, not a
+    semantic search — so we get that code's definition rather than its nearest
+    neighbours. A code the index does not hold is reported as absent rather than
+    described from memory. That is not pedantry: this store is missing roughly a
+    third of its HCPCS codes, and CPT is reissued every January.
 
-    * the query named codes ("what is CPT 45378?") — exact descriptor fetch, so
-      we get that code's definition rather than its nearest neighbours;
-    * the query described a procedure ("explain diagnostic mammography") —
-      semantic search for candidate codes, then explain those.
-
-    A code the index does not hold is reported as absent rather than described
-    from memory. That is not pedantry: this store is missing roughly a third of
-    its HCPCS codes, and billing codes are reissued every year.
+    A question with no code in it belongs to :class:`ExplainTool`, not here.
     """
 
     name = router.LOOKUP
-    description = "What a CPT/HCPCS code means, or what a procedure, test or condition is."
-
-    #: How many candidates to explain when searching by description.
-    SEARCH_LIMIT = 5
+    description = "What a specific CPT/HCPCS code means."
 
     def __init__(self, retriever: Any, engine: Any) -> None:
         self.retriever = retriever
@@ -110,9 +108,15 @@ class LookupTool(Tool):
 
     # ------------------------------------------------------------------
     def _exact(self, codes: Sequence[str]) -> Tuple[List[Tuple[str, str, str]], List[str]]:
-        """(family, code, text) for codes found, and the codes that were not."""
+        """(family, code, text) for codes found, and the codes absent everywhere.
+
+        "Absent" means absent from *both* collections. Checking each collection
+        independently would report every legitimate hit as missing from the other
+        one — and then hand the model both the descriptor and a claim that there
+        is no descriptor.
+        """
         found: List[Tuple[str, str, str]] = []
-        missing: List[str] = []
+        resolved: set = set()
 
         for family, lookup in (
             ("CPT", self.retriever.lookup_cpt),
@@ -126,33 +130,11 @@ class LookupTool(Tool):
 
                 if text:
                     found.append((family, code, text))
-                else:
-                    missing.append(code)
+                    resolved.add(code.upper())
+
+        missing = [code for code in codes if code.upper() not in resolved]
 
         return found, missing
-
-    # ------------------------------------------------------------------
-    def _search(self, query: str) -> List[Tuple[str, str, str]]:
-        """Semantic search for codes matching a described procedure."""
-        found: List[Tuple[str, str, str]] = []
-
-        for family, retrieve in (
-            ("CPT", self.retriever.retrieve_cpt),
-            ("HCPCS", self.retriever.retrieve_hcpcs),
-        ):
-            frame = retrieve({"medical": [query]})
-
-            if frame is None or frame.empty:
-                continue
-
-            for record in frame.head(self.SEARCH_LIMIT).to_dict(orient="records"):
-                code = str(record.get("code", "")).strip()
-                text = str(record.get("text", "")).strip()
-
-                if code or text:
-                    found.append((family, code, text))
-
-        return found
 
     # ------------------------------------------------------------------
     def run(
@@ -162,22 +144,34 @@ class LookupTool(Tool):
         stream: ev.EventStream,
     ) -> ToolResult:
         codes = [str(code).strip().upper() for code in (intent.codes or []) if code]
-        stage = "lookup"
 
-        if codes:
+        if not codes:
+            # Routing sends codeless questions to ExplainTool. If one lands here
+            # anyway, answer generally rather than failing the request.
             stream.emit(
                 ev.STAGE_STARTED,
-                stage=stage,
-                detail=f"Looking up {', '.join(codes)} in the code index",
+                stage=self.name,
+                detail="No code in the query — answering without the index",
             )
-            entries, missing = self._exact(codes)
-        else:
-            stream.emit(
-                ev.STAGE_STARTED,
-                stage=stage,
-                detail="Searching the code index for matching codes",
+
+            answer = self.engine.explain(query)
+
+            stream.emit(ev.STAGE_CONTENT, stage=self.name, content={"answer": answer})
+            stream.emit(ev.STAGE_FINISHED, stage=self.name)
+
+            return ToolResult(
+                tool=self.name,
+                answer=answer,
+                notes=["No code was named, so nothing was looked up."],
             )
-            entries, missing = self._search(query), []
+
+        stream.emit(
+            ev.STAGE_STARTED,
+            stage=self.name,
+            detail=f"Looking up {', '.join(codes)} in the code index",
+        )
+
+        entries, missing = self._exact(codes)
 
         lines = [f"- {family} {code}: {text}" for family, code, text in entries]
 
@@ -188,7 +182,7 @@ class LookupTool(Tool):
 
         stream.emit(
             ev.STAGE_CONTENT,
-            stage=stage,
+            stage=self.name,
             content={"entries": entries, "missing": missing, "context": context},
         )
 
@@ -206,10 +200,10 @@ class LookupTool(Tool):
 
         stream.emit(
             ev.STAGE_CONTENT,
-            stage=stage,
+            stage=self.name,
             content={"answer": answer},
         )
-        stream.emit(ev.STAGE_FINISHED, stage=stage)
+        stream.emit(ev.STAGE_FINISHED, stage=self.name)
 
         return ToolResult(
             tool=self.name,
@@ -217,4 +211,49 @@ class LookupTool(Tool):
             payload={"entries": entries, "missing": missing, "context": context},
             grounded_on=[f"{family} {code}" for family, code, _ in entries],
             notes=notes,
+        )
+
+
+class ExplainTool(Tool):
+    """Answer a general question straight from the model.
+
+    No retrieval, on purpose. MedGemma is a clinical model and knows this
+    material, and a question with no code in it has nothing in the index to
+    ground against — so there is no reason to search.
+
+    Skipping the search also removes a failure mode. Embedding a conversational
+    question ("can you explain me what is diagnostic mammography") produces a far
+    worse query vector than embedding an extracted term would, and the price path
+    never embeds raw text for exactly that reason. Nothing here needs either.
+    """
+
+    name = router.EXPLAIN
+    description = "What a procedure, test or condition is, in general terms."
+
+    def __init__(self, engine: Any) -> None:
+        self.engine = engine
+
+    def run(
+        self,
+        query: str,
+        intent: router.Intent,
+        stream: ev.EventStream,
+    ) -> ToolResult:
+        stream.emit(
+            ev.STAGE_STARTED,
+            stage=self.name,
+            detail="Answering from the model — no index lookup",
+        )
+
+        # context=None selects the general prompt, which states plainly that no
+        # lookup happened, so the model cannot imply it searched.
+        answer = self.engine.explain(query)
+
+        stream.emit(ev.STAGE_CONTENT, stage=self.name, content={"answer": answer})
+        stream.emit(ev.STAGE_FINISHED, stage=self.name)
+
+        return ToolResult(
+            tool=self.name,
+            answer=answer,
+            notes=["General information from the model; nothing was looked up."],
         )
