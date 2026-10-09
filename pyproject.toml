@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pt-healthcare"
+version = "0.1.0"
+description = "Healthcare Price Transparency prototype: CPT/HCPCS retrieval + MRF price lookup + patient-facing answer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "huggingface_hub>=0.24",
+    "transformers>=4.53",
+    "torch>=2.4",
+    "torchaudio",
+    "torchvision",
+    "sentence-transformers>=3.0",
+    "qdrant-client>=1.9",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+pt-healthcare = "pt_healthcare.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pt_healthcare*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

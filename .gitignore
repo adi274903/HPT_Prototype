@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test / tooling caches
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local data artifacts (large, gated, or hospital-specific)
+New_PT_DB/
+*.tar.gz
+*.zip
+*_mrf_clean*.csv
+*.csv
+!requirements*.txt

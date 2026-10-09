@@ -1,0 +1,12 @@
+# Runtime dependencies for the Healthcare Price Transparency prototype.
+# Mirrors the notebook's `pip install` cell plus pandas / python-dotenv.
+huggingface_hub>=0.24
+transformers>=4.53
+torch>=2.4
+torchaudio
+torchvision
+sentence-transformers>=3.0
+qdrant-client>=1.9
+pandas>=2.0
+numpy>=1.26
+python-dotenv>=1.0
