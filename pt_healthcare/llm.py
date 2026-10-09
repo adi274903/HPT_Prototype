@@ -61,6 +61,7 @@ class MedGemmaEngine:
         output = self.pipe(
             text=messages,
             max_new_tokens=config.max_new_tokens(),
+            do_sample=False,
         )
 
         return output[0]["generated_text"][-1]["content"]
@@ -111,6 +112,10 @@ class MedGemmaEngine:
             },
         ]
 
-        output_ = self.pipe(text=messages, max_new_tokens=config.max_new_tokens())
+        output_ = self.pipe(
+            text=messages,
+            max_new_tokens=config.max_new_tokens(),
+            do_sample=False,
+        )
 
         return output_[0]["generated_text"][-1]["content"]

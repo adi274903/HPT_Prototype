@@ -127,7 +127,7 @@ def test_vocabulary_block_lists_both_sides():
     assert "insurers (1):" in block
     assert "- Aetna" in block
     # The instruction that stops the model dumping the whole list back.
-    assert "never return the list itself" in block
+    assert "Never return the list itself" in block
 
 
 def test_vocabulary_block_omits_an_empty_side():

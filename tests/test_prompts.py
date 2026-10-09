@@ -75,6 +75,44 @@ def test_every_model_call_sets_an_explicit_token_budget():
     assert config.max_new_tokens() > 256
 
 
+def test_categorizer_prompt_scopes_the_reference_lists():
+    """The lists must not read as a whitelist for medical or medication.
+
+    Regression: with the lists present, "What might a diagnostic mammogram cost
+    at UPMC Presbyterian with UPMC Health Plan?" came back with ``medical: []``.
+    The two categories that had lists were filled; the one without was not.
+    """
+    prompt = build_categorizer_prompt("q", ["Upmc Altoona"], ["Aetna"])
+
+    assert "hospital and insurer categories ONLY" in prompt
+    assert "restrict the medical or medication categories" in prompt
+
+
+def test_categorizer_prompt_shows_a_fully_populated_price_query():
+    """The regression query, taught as a worked example."""
+    prompt = build_categorizer_prompt("q")
+
+    assert '"medical": ["diagnostic mammogram"]' in prompt
+    assert "Every category is filled from the query text." in prompt
+
+
+def test_every_model_call_is_deterministic():
+    """All three calls must be greedy.
+
+    The categorizer and the answer step both used to sample, so the same query
+    produced different entities and different answers on consecutive runs.
+    """
+    import inspect
+
+    from pt_healthcare.llm import MedGemmaEngine
+
+    source = inspect.getsource(MedGemmaEngine)
+
+    assert source.count("do_sample=False") == 3, (
+        "categorize/decide/answer must all be deterministic"
+    )
+
+
 def test_decision_prompt_compacts_and_serializes_candidates():
     categorization = {
         "medical": ["diagnostic mammogram"],

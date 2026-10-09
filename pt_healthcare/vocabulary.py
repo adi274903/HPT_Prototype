@@ -238,11 +238,16 @@ def vocabulary_block(
 
     lines = [
         "",
-        "    Known entries in the published price file. When the query refers to one",
-        "    of these, return the exact string from the list below — matching loosely,",
-        "    since a misspelling, an abbreviation or a partial name still refers to an",
-        "    entry. Do not invent a name, and never return the list itself: only what",
-        "    the query actually refers to.",
+        "    Reference — the only hospital and payer names that exist in the published",
+        "    price file. When the query refers to one of these, return the exact string",
+        "    from the list below, matching loosely: a misspelling, an abbreviation or a",
+        "    partial name still refers to an entry. Never return the list itself — only",
+        "    what the query actually refers to.",
+        "",
+        "    This reference covers the hospital and insurer categories ONLY. It does not",
+        "    restrict the medical or medication categories: a procedure, condition, test",
+        "    or drug named in the query always belongs in medical or medication, whether",
+        "    or not any list below mentions it.",
         "",
     ]
 

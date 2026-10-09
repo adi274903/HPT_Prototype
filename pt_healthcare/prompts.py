@@ -110,6 +110,18 @@ def build_categorizer_prompt(
     "hospital" is empty because the query names no facility. Asking *which*
     hospital you should use is not naming one.
 
+    Query: What might a diagnostic mammogram cost at UPMC Presbyterian with UPMC Health Plan?
+    Output:
+    {{
+      "medical": ["diagnostic mammogram"],
+      "hospital": ["UPMC Presbyterian"],
+      "insurer": ["UPMC Health Plan"],
+      "medication" : []
+    }}
+
+    Every category is filled from the query text. Only the hospital and insurer
+    values additionally get matched against the reference lists.
+
     Now classify this query:
 
     Query: {user_query}
