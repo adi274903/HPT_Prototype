@@ -34,7 +34,8 @@ PT_Healthcare/
 │   ├── pricing.py            # sql_answer(): filter the MRF DataFrame
 │   ├── pipeline.py           # HealthcarePricingPipeline: the 7-step orchestration
 │   └── cli.py                # command-line entry point
-├── colab_run.py              # Google Colab runner: pip/drive/tar glue + CLI
+├── colab_run.py              # Colab runner: pip/drive/tar glue + UI serving + tunnel
+├── ui/                       # TypeScript front end (2 pages) + pt_serve.py server
 ├── scripts/download_db.sh    # fetch + extract the Qdrant snapshot
 ├── examples/run_pipeline.py  # minimal end-to-end example
 ├── tests/                    # pytest suite for every pure component
@@ -163,6 +164,60 @@ python -m pt_healthcare --interactive
 ```
 
 `--json` emits the full result dict as JSON; `--quiet` suppresses step logging.
+
+## Front end (TypeScript UI)
+
+`ui/` holds the two front-end pages and the stdlib-only server that hosts them:
+`pt_patient.html` (patient chat, every `$` figure cited to the MRF row behind
+it), `pt_frontend.html` (the seven pipeline steps, candidates, validation and
+price table), and `pt_serve.py`.
+
+`colab_run.serve_ui()` wires the backend into them and, by default, publishes a
+public Cloudflare quick tunnel (no account required):
+
+```python
+import colab_run
+
+ui = colab_run.serve_ui(pipeline, page="patient", tunnel="cloudflare")
+print(ui.pages)
+# {'patient': 'https://<random>.trycloudflare.com/',
+#  'dashboard': 'https://<random>.trycloudflare.com/pipeline'}
+
+ui.stop()          # end the server and the tunnel
+```
+
+Or build the pipeline and serve in one call — `serve_ui()` accepts the same
+kwargs as `setup()`:
+
+```python
+ui = colab_run.serve_ui()          # models + data + UI + tunnel
+```
+
+| Argument | Default | Notes |
+| --- | --- | --- |
+| `tunnel` | `cloudflare` | `cloudflare` (cloudflared quick tunnel, auto-downloaded), `ngrok` (needs `pip install pyngrok` + `NGROK_AUTHTOKEN`), `none` (localhost / Colab kernel-port iframe only) |
+| `page` | `patient` | Which page the in-notebook iframe opens; both are always served |
+| `port` | `8000` | Falls back through 8001 / 8080 / 8888 / a free port |
+| `host` | `127.0.0.1` | `0.0.0.0` to also expose on the LAN |
+
+From the CLI:
+
+```bash
+python colab_run.py --serve-ui                      # tunnel, blocks (Ctrl-C stops)
+python colab_run.py --serve-ui --tunnel none        # local only
+python colab_run.py --serve-ui --ui-page dashboard  # open the pipeline view
+```
+
+**Security.** A tunnel URL is public and *unauthenticated*: anyone holding it
+can run queries against the pipeline and consume the GPU. Prefer `tunnel="none"`
+unless you actually need remote access, and call `ui.stop()` when you are done.
+There is no built-in auth — adding one means patching `ui/pt_serve.py`, which is
+deliberately byte-identical to its source of truth (see `ui/README.md`).
+
+`pt_serve.py` calls `pipeline.run` directly and parses the pipeline's own log
+lines, so the UI reports the real backend's behaviour rather than a
+reimplementation of it. The front-end sources and its own test suite live in
+`~/projects/reseearch_work/Price_Transparency/frontend`.
 
 ## Tests
 

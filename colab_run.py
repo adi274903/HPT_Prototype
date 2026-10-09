@@ -2,19 +2,14 @@
 
 Single entry point that keeps every Colab-specific bit (the ``!pip install``
 cell, ``drive.mount``, the ``!cp`` + ``!tar -xzf`` snapshot staging, dotenv /
-Colab-secret token lookup) next to the wiring for models, Qdrant and the MRF.
+Colab-secret token lookup) next to the wiring for models, Qdrant, the MRF *and*
+the TypeScript front end, which can be published on a public URL through a
+Cloudflare quick tunnel.
 
-Two ways to use it in Colab
----------------------------
+Ways to use it in Colab
+-----------------------
 
-**As a script** (after cloning the repo)::
-
-    !git clone https://github.com/adi274903/HPT_Prototype /content/HPT_Prototype
-    %cd /content/HPT_Prototype
-    !pip install -q -r requirements.txt
-    !python colab_run.py
-
-**As a module** (calls the same code, keeps the pipeline warm between queries)::
+**Backend only** (answers in the notebook)::
 
     %cd /content/HPT_Prototype
     import colab_run
@@ -23,11 +18,35 @@ Two ways to use it in Colab
     colab_run.stage_db()                  # !cp ... && !tar -xzf ...
     pipeline = colab_run.setup(mount=False, stage=False)
 
-    result = colab_run.run(
-        "What might a diagnostic mammogram cost at UPMC Presbyterian "
-        "with UPMC Health Plan?",
-        pipeline,
-    )
+    result = colab_run.run("What might a diagnostic mammogram cost at "
+                           "UPMC Presbyterian with UPMC Health Plan?", pipeline)
+
+**Front end + backend on a public URL** (the chat page, reachable anywhere)::
+
+    %cd /content/HPT_Prototype
+    import colab_run
+
+    ui = colab_run.serve_ui()             # models + data + UI + tunnel
+    print(ui.page_url)                    # https://<random>.trycloudflare.com/
+
+    ui.stop()                             # ends the server and the tunnel
+
+``serve_ui()`` drives the vendored ``ui/pt_serve.py`` (stdlib HTTP + SSE server)
+with ``pipeline.run`` as its orchestration callable, so the UI streams the real
+backend: the server tee's stdout and parses the pipeline's own log lines, which
+means the pages can never drift from the pipeline's behaviour.
+
+**As a script**::
+
+    !git clone https://github.com/adi274903/HPT_Prototype /content/HPT_Prototype
+    %cd /content/HPT_Prototype
+    !pip install -q -r requirements.txt
+    !python colab_run.py                       # backend: the 3 sample queries
+    !python colab_run.py --serve-ui --tunnel none
+
+SECURITY: a tunnel URL is public and unauthenticated. Anyone holding it can run
+queries against the pipeline (and consume the GPU). Use ``--tunnel none`` when
+you do not need a public URL, and stop the server (``ui.stop()``) when finished.
 
 Nothing here is imported by the ``pt_healthcare`` package, so the package still
 imports cleanly on a machine without ``google.colab``.
@@ -37,10 +56,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Sequence
+import time
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 # --- make the sibling package importable when running from the repo root ----
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -92,6 +116,14 @@ DEFAULT_QUERIES: Sequence[str] = (
     "Best and cheapest hospital for me to get my colonoscopy done with Highmark BCBS?",
     "Best and cheapest hospital for me to get my mammogram done?",
 )
+
+# ---------------------------------------------------------------------------
+# Front-end assets (vendored into ui/)
+# ---------------------------------------------------------------------------
+UI_DIR = os.path.join(_REPO_ROOT, "ui")
+PATIENT_HTML = os.path.join(UI_DIR, "pt_patient.html")
+DASHBOARD_HTML = os.path.join(UI_DIR, "pt_frontend.html")
+PT_SERVE_MODULE = "pt_serve"
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +238,7 @@ def stage_db(
 
 
 # ---------------------------------------------------------------------------
-# Wiring
+# Wiring (backend)
 # ---------------------------------------------------------------------------
 def default_paths() -> Dict[str, str]:
     """The Colab paths the notebook used, as a dict."""
@@ -226,7 +258,15 @@ def build_pipeline(
     login: bool = True,
     token: Optional[str] = None,
 ) -> HealthcarePricingPipeline:
-    """Load models + data and return a ready-to-run pipeline."""
+    """Load models + data and return a ready-to-run pipeline.
+
+    The pipeline keeps its own handles, which is what the UI server needs:
+
+    - ``pipeline.retriever.client``      -> the Qdrant store
+    - ``pipeline.retriever.embed_model``
+    - ``pipeline.mrf_data``              -> row count for the status strip
+    - ``pipeline.top_k``
+    """
     load_env()
 
     if login:
@@ -312,18 +352,402 @@ def run_batch(
 
 
 # ---------------------------------------------------------------------------
+# Front end: the vendored pt_serve server
+# ---------------------------------------------------------------------------
+def import_pt_serve() -> Any:
+    """Import the vendored ``ui/pt_serve.py`` (stdlib-only HTTP + SSE server)."""
+    if UI_DIR not in sys.path:
+        sys.path.insert(0, UI_DIR)
+
+    import importlib
+
+    module = importlib.import_module(PT_SERVE_MODULE)
+
+    if not hasattr(module, "serve"):
+        raise RuntimeError(
+            f"{PT_SERVE_MODULE} at {UI_DIR} does not look like the pt_serve server."
+        )
+
+    return module
+
+
+def check_ui_assets() -> Dict[str, bool]:
+    """Which front-end assets are present (both pages are needed for the UI)."""
+    return {
+        "pt_serve.py": os.path.isfile(os.path.join(UI_DIR, "pt_serve.py")),
+        "pt_patient.html": os.path.isfile(PATIENT_HTML),
+        "pt_frontend.html": os.path.isfile(DASHBOARD_HTML),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Front end: public tunnels
+# ---------------------------------------------------------------------------
+# cloudflared prints its quick-tunnel URL to its own log.
+_TRYCLOUDFLARE_RE = re.compile(r"https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com")
+
+CLOUDFLARED_RELEASE = (
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+    "cloudflared-{system}-{arch}"
+)
+
+
+def _cloudflared_dest() -> str:
+    base = COLAB_WORKDIR if in_colab() else os.path.join(_REPO_ROOT, ".cache")
+    return os.path.join(base, "cloudflared")
+
+
+def _cloudflared_release_url() -> str:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    arch = "arm64" if machine in {"aarch64", "arm64"} else "amd64"
+
+    if system == "darwin":
+        # macOS ships a .tgz rather than a bare binary.
+        return (
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+            f"cloudflared-darwin-{arch}.tgz"
+        )
+
+    return CLOUDFLARED_RELEASE.format(system="linux", arch=arch)
+
+
+def ensure_cloudflared(dest: Optional[str] = None, verbose: bool = True) -> str:
+    """Return a usable ``cloudflared`` binary, downloading it if necessary.
+
+    Colab does not ship cloudflared; the static release binary is a single file,
+    so this needs no package manager.
+    """
+    found = shutil.which("cloudflared")
+    if found:
+        return found
+
+    dest = dest or _cloudflared_dest()
+
+    if os.path.isfile(dest) and os.access(dest, os.X_OK):
+        return dest
+
+    url = _cloudflared_release_url()
+
+    if url.endswith(".tgz"):
+        raise RuntimeError(
+            "Automatic cloudflared download is only wired up for Linux. On macOS "
+            "install it with `brew install cloudflared` and re-run."
+        )
+
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+    if verbose:
+        print(f"Downloading cloudflared -> {dest}")
+
+    urllib.request.urlretrieve(url, dest)
+    os.chmod(dest, 0o755)
+
+    return dest
+
+
+@dataclass
+class Tunnel:
+    """A public URL forwarding to the local UI server."""
+
+    url: str
+    provider: str
+    _stop: Optional[Callable[[], None]] = field(default=None, repr=False)
+
+    def stop(self) -> None:
+        if self._stop is not None:
+            try:
+                self._stop()
+            finally:
+                self._stop = None
+
+    def __repr__(self) -> str:
+        return f"<Tunnel provider={self.provider} url={self.url}>"
+
+
+def start_cloudflare_tunnel(
+    port: int,
+    host: str = "127.0.0.1",
+    timeout: int = 60,
+    binary: Optional[str] = None,
+    verbose: bool = True,
+) -> Tunnel:
+    """Start a Cloudflare quick tunnel (no account; random ``trycloudflare.com`` URL)."""
+    binary = binary or ensure_cloudflared(verbose=verbose)
+
+    command = [binary, "tunnel", "--url", f"http://{host}:{port}", "--no-autoupdate"]
+
+    if verbose:
+        print("Starting Cloudflare quick tunnel...")
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    url: Optional[str] = None
+    seen: List[str] = []
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        line = process.stdout.readline() if process.stdout else ""
+
+        if not line:
+            if process.poll() is not None:
+                break
+            time.sleep(0.1)
+            continue
+
+        seen.append(line.rstrip())
+        match = _TRYCLOUDFLARE_RE.search(line)
+        if match:
+            url = match.group(0)
+            break
+
+    if not url:
+        process.terminate()
+        raise RuntimeError(
+            f"cloudflared did not publish a URL within {timeout}s. Output:\n"
+            + "\n".join(seen[-20:])
+        )
+
+    def _stop() -> None:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    return Tunnel(url=url, provider="cloudflare", _stop=_stop)
+
+
+def start_ngrok_tunnel(port: int, token: Optional[str] = None, **kwargs: Any) -> Tunnel:
+    """Start an ngrok tunnel (needs ``pip install pyngrok`` and an authtoken)."""
+    try:
+        from pyngrok import ngrok
+    except ImportError as error:
+        raise RuntimeError(
+            "pyngrok is not installed. Run `pip install pyngrok` and provide an "
+            "authtoken (ngrok config, or the NGROK_AUTHTOKEN env var)."
+        ) from error
+
+    token = token or os.getenv("NGROK_AUTHTOKEN")
+    if token:
+        ngrok.set_auth_token(token)
+
+    tunnel = ngrok.connect(port, "http")
+
+    def _stop() -> None:
+        try:
+            ngrok.disconnect(tunnel.public_url)
+        except Exception:
+            pass
+
+    return Tunnel(url=str(tunnel.public_url), provider="ngrok", _stop=_stop)
+
+
+def start_tunnel(
+    port: int,
+    provider: str = "auto",
+    host: str = "127.0.0.1",
+    verbose: bool = True,
+    **kwargs: Any,
+) -> Optional[Tunnel]:
+    """Start a public tunnel for ``port``.
+
+    ``provider``: ``cloudflare`` (default, no account needed), ``ngrok``,
+    ``none``/``off`` (skip), or ``auto`` (== cloudflare).
+    """
+    provider = (provider or "auto").strip().lower()
+
+    if provider in {"none", "off", "no", ""}:
+        return None
+
+    if provider == "auto":
+        provider = "cloudflare"
+
+    if provider == "cloudflare":
+        return start_cloudflare_tunnel(port, host=host, verbose=verbose, **kwargs)
+
+    if provider == "ngrok":
+        return start_ngrok_tunnel(port, **kwargs)
+
+    raise ValueError(
+        f"Unknown tunnel provider {provider!r}. Use 'cloudflare', 'ngrok' or 'none'."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Front end: serving
+# ---------------------------------------------------------------------------
+@dataclass
+class UIServer:
+    """The UI server plus (optionally) its public tunnel."""
+
+    server: Any
+    local_url: str
+    page: str = "patient"
+    tunnel: Optional[Tunnel] = None
+
+    @property
+    def url(self) -> str:
+        """The best URL to hand out — public if tunnelled, local otherwise."""
+        return self.tunnel.url if self.tunnel is not None else self.local_url
+
+    @property
+    def page_url(self) -> str:
+        """Direct link to the requested page (``/`` = chat, ``/pipeline`` = dashboard)."""
+        base = self.url.rstrip("/")
+        return base + ("/pipeline" if self.page == "dashboard" else "/")
+
+    @property
+    def pages(self) -> Dict[str, str]:
+        base = self.url.rstrip("/")
+        return {
+            "patient": base + "/",
+            "dashboard": base + "/pipeline",
+        }
+
+    def stop(self) -> None:
+        if self.tunnel is not None:
+            self.tunnel.stop()
+        try:
+            self.server.stop()
+        except Exception:
+            pass
+
+    def __repr__(self) -> str:
+        return f"<UIServer page={self.page} url={self.page_url}>"
+
+
+def _display_iframe(ui: UIServer, height: int = 1180, width: str = "100%") -> None:
+    """Render the UI inline (Colab kernel-port iframe, else a plain iframe)."""
+    path = "/pipeline" if ui.page == "dashboard" else "/"
+
+    try:
+        from google.colab import output  # type: ignore
+
+        try:
+            output.serve_kernel_port_as_iframe(
+                ui.server.port, path=path, height=height, width=width
+            )
+            return
+        except TypeError:
+            output.serve_kernel_port_as_iframe(ui.server.port, height=height, width=width)
+            return
+    except Exception:
+        pass
+
+    try:
+        from IPython.display import HTML, display  # type: ignore
+
+        display(
+            HTML(
+                f'<iframe src="{ui.page_url}" width="{width}" height="{height}" '
+                'style="border:1px solid #e4e4e1;border-radius:10px;background:#fff">'
+                "</iframe>"
+            )
+        )
+    except Exception:
+        print(f"UI: {ui.page_url}")
+
+
+def serve_ui(
+    pipeline: Optional[HealthcarePricingPipeline] = None,
+    page: str = "patient",
+    port: int = 8000,
+    host: str = "127.0.0.1",
+    tunnel: str = "cloudflare",
+    html_path: Optional[str] = None,
+    patient_html_path: Optional[str] = None,
+    display: Optional[bool] = None,
+    height: int = 1180,
+    width: str = "100%",
+    verbose: bool = True,
+    **setup_kwargs: Any,
+) -> UIServer:
+    """Serve the TypeScript front end against this backend, optionally tunnelled.
+
+    Wires ``pipeline.run`` in as the orchestration callable — the server tee's
+    its stdout and parses the pipeline's own log lines, so the pages track the
+    real backend rather than a reimplementation of it.
+
+    Returns a `UIServer`; call ``.stop()`` to end the server and the tunnel.
+    """
+    if pipeline is None:
+        pipeline = setup(**setup_kwargs)
+
+    missing = [name for name, ok in check_ui_assets().items() if not ok]
+
+    if missing:
+        raise FileNotFoundError(
+            f"Front-end assets missing from {UI_DIR}: {missing}. Rebuild them in "
+            "the front-end repo (`npm run build`) and copy pt_patient.html, "
+            "pt_frontend.html and pt_serve.py back into ui/."
+        )
+
+    pt_serve = import_pt_serve()
+
+    handle = pt_serve.serve(
+        orchestration=pipeline.run,
+        html_path=html_path or DASHBOARD_HTML,
+        patient_html_path=patient_html_path or PATIENT_HTML,
+        mrf_data=pipeline.mrf_data,
+        client=getattr(pipeline.retriever, "client", None),
+        top_k=pipeline.top_k,
+        port=port,
+        host=host,
+    )
+
+    public = start_tunnel(handle.port, provider=tunnel, host=host, verbose=verbose)
+
+    ui = UIServer(server=handle, local_url=handle.url, page=page, tunnel=public)
+
+    if verbose:
+        print(f"\nLocal      : {ui.local_url}")
+        if public is not None:
+            print(f"Public     : {ui.page_url}   (via {public.provider})")
+            print(
+                "             ^ public and unauthenticated - anyone with this URL can\n"
+                "               run queries on this pipeline. ui.stop() shuts it down."
+            )
+        else:
+            print(f"Page       : {ui.page_url}")
+        print(
+            f"Pages      : patient={ui.pages['patient']}  "
+            f"dashboard={ui.pages['dashboard']}"
+        )
+
+    if display is None:
+        display = in_colab()
+
+    if display and public is None:
+        # Inside Colab the kernel-port iframe is the cheapest path. With a tunnel
+        # the public URL is the point, so leave the cell output alone.
+        _display_iframe(ui, height=height, width=width)
+
+    return ui
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="colab_run.py",
         description=(
-            "Run the HPT prototype from a Colab cell or as a script. "
-            "With no --query it runs the notebook's validation queries."
+            "Run the HPT prototype from a Colab cell or as a script. With no "
+            "--query it runs the notebook's validation queries; with --serve-ui "
+            "it serves the TypeScript front end (optionally tunnelled)."
         ),
     )
 
-    parser.add_argument("queries", nargs="*", help="Queries to run (defaults to the notebook's queries).")
+    parser.add_argument("queries", nargs="*", help="Queries to run.")
     parser.add_argument("--query", "-q", action="append", dest="extra_queries", help="Add a query (repeatable).")
 
     parser.add_argument("--install", action="store_true", help="pip install the runtime packages first.")
@@ -338,16 +762,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Print each answer as JSON.")
     parser.add_argument("--quiet", action="store_true", help="Suppress per-step logging.")
 
+    ui = parser.add_argument_group("front end")
+    ui.add_argument("--serve-ui", action="store_true", help="Serve the TypeScript UI against this backend.")
+    ui.add_argument("--ui-page", choices=["patient", "dashboard"], default="patient")
+    ui.add_argument("--port", type=int, default=8000)
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument(
+        "--tunnel",
+        default="cloudflare",
+        choices=["cloudflare", "ngrok", "none"],
+        help="Public tunnel provider for --serve-ui (default: cloudflare).",
+    )
+    ui.add_argument(
+        "--serve-once",
+        action="store_true",
+        help="Serve, run the queries, then exit instead of blocking (kills the tunnel).",
+    )
+
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
-    queries: List[str] = list(args.queries)
+    explicit: List[str] = list(args.queries)
     if args.extra_queries:
-        queries.extend(args.extra_queries)
-    if not queries:
+        explicit.extend(args.extra_queries)
+
+    if explicit:
+        queries = explicit
+    elif args.serve_ui:
+        queries = []          # serving is the job; don't burn three runs first
+    else:
         queries = list(DEFAULT_QUERIES)
 
     pipeline = setup(
@@ -359,6 +805,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mrf_csv=args.mrf_csv,
         qdrant_path=args.qdrant_path,
     )
+
+    ui: Optional[UIServer] = None
+
+    if args.serve_ui:
+        ui = serve_ui(
+            pipeline=pipeline,
+            page=args.ui_page,
+            port=args.port,
+            host=args.host,
+            tunnel=args.tunnel,
+            display=in_colab(),
+        )
 
     for query in queries:
         result = pipeline.run(query, verbose=not args.quiet)
@@ -382,6 +840,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         else:
             print("\n>>> FINAL ANSWER:\n" + str(result["answer"]))
+
+    if ui is not None and not args.serve_once:
+        print("\nServing. Interrupt to stop (the tunnel dies with this process).")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            print()
+        finally:
+            ui.stop()
 
     return 0
 

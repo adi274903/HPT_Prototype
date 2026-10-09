@@ -21,3 +21,6 @@ New_PT_DB/
 *_mrf_clean*.csv
 *.csv
 !requirements*.txt
+
+# Downloaded tunnel binary
+.cache/
