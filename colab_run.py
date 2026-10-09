@@ -83,8 +83,10 @@ from pt_healthcare.data import (  # noqa: E402
 )
 from pt_healthcare.llm import MedGemmaEngine  # noqa: E402
 from pt_healthcare.models import load_models  # noqa: E402
+from pt_healthcare.orchestrator import Orchestrator  # noqa: E402
 from pt_healthcare.pipeline import HealthcarePricingPipeline  # noqa: E402
 from pt_healthcare.retrieval import CodeRetriever  # noqa: E402
+from pt_healthcare.tools import LookupTool, PriceTool  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Colab defaults — exactly the paths the original notebook used
@@ -425,6 +427,45 @@ def build_pipeline(
         engine=MedGemmaEngine(pipe),
         mrf_data=mrf_data,
         top_k=top_k,
+    )
+
+
+def build_orchestrator(
+    pipeline: Optional[HealthcarePricingPipeline] = None,
+    **kwargs,
+) -> Orchestrator:
+    """Wire the tools into an orchestrator, reusing ``build_pipeline``'s handles.
+
+    Two tools, one per kind of question:
+
+    - ``price``  — the patient asks what something costs. The 7-step
+      orchestration is this tool's body, unchanged.
+    - ``lookup`` — the patient names a CPT/HCPCS code, or asks what a procedure
+      is. Descriptors come from the code index; a code the index does not hold is
+      reported as absent rather than described from memory.
+
+    Routing is ``pt_healthcare.router``: rules first, and the model only to break
+    a tie when the wording gives no cue. Events are emitted as each stage produces
+    data, which is what lets a UI fill a block without waiting for the run to
+    finish::
+
+        orchestrator = colab_run.build_orchestrator()
+
+        stream = pt_healthcare.events.EventStream(sink=print)
+        run = orchestrator.run("what is CPT 45378?", stream=stream)
+        print(run["answer"])
+
+    Pass ``pipeline`` to reuse one you already built instead of loading the models
+    again. Any other keyword goes to :func:`build_pipeline`.
+    """
+    pipeline = pipeline or build_pipeline(**kwargs)
+
+    return Orchestrator(
+        tools=[
+            PriceTool(pipeline),
+            LookupTool(pipeline.retriever, pipeline.engine),
+        ],
+        engine=pipeline.engine,
     )
 
 

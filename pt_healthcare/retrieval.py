@@ -7,7 +7,7 @@ injection (which also makes it testable without a GPU or a real store).
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from typing import Any, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -88,6 +88,75 @@ class CodeRetriever:
                 for rank, hit in enumerate(hits, start=1)
             ]
         )
+
+    # ------------------------------------------------------------------
+    def lookup_codes(self, codes: Optional[Sequence[str]], collection_name: str) -> pd.DataFrame:
+        """Fetch the descriptors for codes the query already named.
+
+        Not a semantic search: for "what is 77065?" we want *that* code's
+        descriptor, not its nearest neighbours. The payload contract is
+        ``{'code', 'text'}``.
+
+        A requested code that is absent from the collection still gets a row, with
+        an empty ``text`` and a score of 0.0 — the caller can then say "not in the
+        index" instead of letting a model improvise a definition. That matters:
+        this store is missing about a third of its HCPCS codes.
+        """
+        wanted: List[str] = []
+
+        for code in codes or []:
+            text = str(code).strip().upper()
+            if text and text not in wanted:
+                wanted.append(text)
+
+        if not wanted:
+            return _empty_candidates()
+
+        from qdrant_client import models
+
+        points, _ = self.client.scroll(
+            collection_name=collection_name,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="code",
+                        match=models.MatchAny(any=wanted),
+                    )
+                ]
+            ),
+            limit=len(wanted),
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        found = {
+            str(point.payload.get("code", "")).strip().upper(): str(
+                point.payload.get("text", "")
+            ).strip()
+            for point in points
+        }
+
+        return pd.DataFrame(
+            [
+                {
+                    "rank": rank,
+                    "score": 1.0 if found.get(code) else 0.0,
+                    "code": code,
+                    "text": found.get(code, ""),
+                }
+                for rank, code in enumerate(wanted, start=1)
+            ]
+        )
+
+    # ------------------------------------------------------------------
+    def lookup_cpt(self, codes: Optional[Sequence[str]]) -> pd.DataFrame:
+        """Exact descriptor lookup in the CPT collection."""
+        return self.lookup_codes(codes, config.cpt_collection())
+
+    # ------------------------------------------------------------------
+    def lookup_hcpcs(self, codes: Optional[Sequence[str]]) -> pd.DataFrame:
+        """Exact descriptor lookup in the HCPCS collection."""
+        return self.lookup_codes(codes, config.hcpcs_collection())
 
     # ------------------------------------------------------------------
     def retrieve_cpt(self, categorized: Mapping[str, Any], top_k: Optional[int] = None) -> pd.DataFrame:

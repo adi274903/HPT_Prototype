@@ -229,6 +229,61 @@ def test_category_words_and_near_misses_are_fixed_before_filtering():
     assert filters["insurers"] == ["upmc health plan"]
 
 
+def test_the_pipeline_emits_stage_content_as_each_stage_finishes():
+    """The point: a UI can fill a block without waiting for the run to end.
+
+    The log lines only ever produce a timeline; block content is projected from
+    run()'s return value, which is why the panels used to stay empty until the
+    end. These events carry the same content as it appears.
+    """
+    from pt_healthcare.events import recorder
+
+    pipeline, _, _ = make_pipeline(
+        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
+    )
+
+    stream, collected = recorder()
+
+    pipeline.run("diagnostic mammogram", verbose=False, stream=stream)
+
+    assert stream.stage_names() == [
+        "entities",
+        "cpt",
+        "hcpcs",
+        "decision",
+        "validation",
+        "mrf",
+        "answer",
+    ]
+
+    entities = [
+        event
+        for event in collected
+        if event.get("stage") == "entities" and event["type"] == "stage_content"
+    ]
+
+    assert entities[0]["content"]["medical"] == ["diagnostic mammogram"]
+
+    mrf = [
+        event
+        for event in collected
+        if event.get("stage") == "mrf" and event["type"] == "stage_content"
+    ]
+
+    assert mrf[0]["content"]["match_count"] == 1
+
+
+def test_the_pipeline_runs_without_a_stream():
+    """Events are additive; nothing may depend on a UI being attached."""
+    pipeline, _, _ = make_pipeline(
+        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
+    )
+
+    result = pipeline.run("diagnostic mammogram", verbose=False)
+
+    assert result["answer"] == "FINAL ANSWER"
+
+
 def test_top_k_is_forwarded_to_the_retriever():
     pipeline, retriever, _ = make_pipeline(
         {"use_codes": "cpt", "cpt_list": [], "hcpcs_list": []},

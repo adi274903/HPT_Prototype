@@ -35,6 +35,10 @@ PT_Healthcare/
 │   ├── retrieval.py          # CodeRetriever: embed + Qdrant search
 │   ├── pricing.py            # sql_answer(): filter the MRF DataFrame
 │   ├── pipeline.py           # HealthcarePricingPipeline: the 7-step orchestration
+│   ├── router.py             # intent analysis: which tool fits this query
+│   ├── tools.py              # PriceTool / LookupTool
+│   ├── orchestrator.py       # classify -> dispatch -> report
+│   ├── events.py             # the structured event stream
 │   └── cli.py                # command-line entry point
 ├── colab_run.py              # Colab runner: pip/drive/tar glue + UI serving + tunnel
 ├── ui/                       # TypeScript front end (2 pages) + pt_serve.py server
@@ -252,6 +256,68 @@ one payload contract regardless of transport.
 
 Verified against the front-end's own suite (259 checks) with both the polling
 server and its mock backend.
+
+## Two tools, one orchestrator
+
+A patient query is routed to a tool, and each tool owns one kind of answer.
+
+| tool | question it answers | body |
+|---|---|---|
+| `price` | "what might a mammogram cost at UPMC with Highmark?" | `HealthcarePricingPipeline` — the 7-step orchestration, **unchanged** |
+| `lookup` | "what is CPT 45378?" / "explain diagnostic mammography" | descriptors from the code index, then an explanation grounded in them |
+
+`lookup` handles both cases because they are the same retrieval twice over: an
+exact descriptor fetch when the query names a code, a semantic search when it
+describes a procedure. A code the index does not hold is reported as absent rather
+than described from memory — this store is missing roughly a third of its HCPCS
+codes, and billing codes are reissued every January.
+
+### Routing is rules first, the model second
+
+`router.classify()` decides in this order:
+
+1. **price wording** (`cost`, `how much`, `billed`, `deductible`, …) — wins even
+   when a code is present, so "how much does 45378 cost at UPMC" prices rather
+   than defines;
+2. **a bare CPT/HCPCS code** — `\d{5}`, `[A-Z]\d{4}`, `\d{4}[FT]`;
+3. **a named facility or payer** — naming your hospital or plan is a price signal
+   even without the word "cost";
+4. **nothing matched** — the model breaks the tie, and if it is missing, broken or
+   nonsensical the default is `lookup`.
+
+The model is the tie-breaker, not the router. The categorizer was silently
+sampling; putting tool selection in the model's hands would be that same bug at
+higher stakes, where a miss means a confidently wrong-shaped answer.
+
+```python
+pipeline = colab_run.setup()
+orchestrator = colab_run.build_orchestrator(pipeline)
+
+run = orchestrator.run("what is CPT 45378?")
+print(run["tool"], "->", run["answer"])
+```
+
+### Events, so a UI can fill a block as it fills
+
+`ui/pt_serve.py` reverse-engineers the pipeline's log strings. That gives a live
+*step rail* but not live *content*: each block is projected from `run()`'s return
+value, so the panels stay empty until the run ends — even though
+`Raw categorizer output:` reached stdout at second 12 of a 200-second run.
+
+The log strings are unchanged, and the vendored UI still parses them. Alongside
+them, the pipeline and the tools emit structured events:
+
+```python
+from pt_healthcare import events
+
+stream = events.EventStream(sink=lambda e: print(e["type"], e.get("stage")))
+run = orchestrator.run("what is 77065?", stream=stream)
+```
+
+`run_started`, `stage_started`, `stage_content`, `stage_finished`, `tool_called`,
+`tool_result`, `run_finished`, `error`. Every event is recorded on the stream even
+with no sink attached, so a run stays inspectable after the fact, and a sink that
+raises is recorded and skipped rather than taking down a GPU run.
 
 ### Closed vocabulary for the categorizer
 

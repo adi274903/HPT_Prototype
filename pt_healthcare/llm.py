@@ -15,6 +15,8 @@ from .prompts import (
     build_answer_prompt,
     build_categorizer_prompt,
     build_decision_prompt,
+    build_explain_prompt,
+    build_intent_prompt,
 )
 
 
@@ -119,3 +121,47 @@ class MedGemmaEngine:
         )
 
         return output_[0]["generated_text"][-1]["content"]
+
+    # ------------------------------------------------------------------
+    # 4. Tool selection  (see router.py - the tie-breaker, not the router)
+    # ------------------------------------------------------------------
+    def classify_intent(self, user_query: str) -> str:
+        """Ask the model which tool fits, for the cases rules cannot settle."""
+        prompt = build_intent_prompt(user_query)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": f"{prompt}"}],
+            },
+        ]
+
+        output = self.pipe(
+            text=messages,
+            max_new_tokens=config.max_new_tokens(),
+            do_sample=False,
+        )
+
+        return output[0]["generated_text"][-1]["content"]
+
+    # ------------------------------------------------------------------
+    # 5. Explanation  (code definitions and general procedure questions)
+    # ------------------------------------------------------------------
+    def explain(self, user_query: str, context: str = "") -> str:
+        """Explain a code or a procedure, grounded in ``context``."""
+        prompt = build_explain_prompt(user_query, context)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": f"{prompt}"}],
+            },
+        ]
+
+        output = self.pipe(
+            text=messages,
+            max_new_tokens=config.max_new_tokens(),
+            do_sample=False,
+        )
+
+        return output[0]["generated_text"][-1]["content"]

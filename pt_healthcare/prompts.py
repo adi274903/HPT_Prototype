@@ -208,3 +208,58 @@ def build_answer_prompt(user_query: str, output: Any, code_plausible: Any) -> st
 
     Answer:
     """
+
+
+def build_intent_prompt(user_query: str) -> str:
+    """Route a patient question to one of the tools.
+
+    Only used when the lexical cues find nothing — this is the tie-breaker, not
+    the router.
+    """
+    return f"""You are routing a patient's question to one of two capabilities.
+
+    price  - what something will cost, what a bill means, what an amount covers.
+    lookup - what a billing code (CPT or HCPCS) means, or what a procedure, test
+             or condition is.
+
+    Answer with exactly one word: price or lookup.
+
+    Question: {user_query}
+
+    Answer:"""
+
+
+def build_explain_prompt(user_query: str, context: str) -> str:
+    """Explain a code or a procedure, grounded in whatever the index returned.
+
+    ``context`` carries the retrieved descriptors, or an explicit note that the
+    code is absent. The strictness is asymmetric on purpose: a billing code must
+    be grounded, because codes are reissued every year and a remembered
+    definition may be wrong; general clinical education may come from the model's
+    own knowledge, because that is what it is for.
+    """
+    return f"""You are a healthcare navigation assistant helping a patient
+    understand billing codes and medical procedures.
+
+    Rules:
+    - If the index entries below cover what was asked, explain from them and name
+      the codes plainly.
+    - If a specific billing code is marked NOT in the index, say that this
+      service does not have a definition for it. Never describe a specific code
+      from memory: billing codes are reissued every year and a remembered
+      definition may be out of date.
+    - For a general question about a procedure, test or condition, you may answer
+      from your own clinical knowledge, but say that it is general information.
+    - Never quote or estimate a price; you have no price data here.
+    - Never advise the patient on their own care or say whether a procedure suits
+      them. Point them to their clinician for anything about their own situation.
+    - Keep it clear and patient-friendly.
+
+    Patient question:
+    {user_query}
+
+    Index entries retrieved for this question:
+    {context}
+
+    Answer:
+    """

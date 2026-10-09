@@ -69,8 +69,8 @@ def test_every_model_call_sets_an_explicit_token_budget():
 
     source = inspect.getsource(MedGemmaEngine)
 
-    assert source.count("max_new_tokens=config.max_new_tokens()") == 3, (
-        "categorize/decide/answer must all pass an explicit budget"
+    assert source.count("max_new_tokens=config.max_new_tokens()") == 5, (
+        "categorize/decide/answer/classify_intent/explain must all pass a budget"
     )
     assert config.max_new_tokens() > 256
 
@@ -108,8 +108,8 @@ def test_every_model_call_is_deterministic():
 
     source = inspect.getsource(MedGemmaEngine)
 
-    assert source.count("do_sample=False") == 3, (
-        "categorize/decide/answer must all be deterministic"
+    assert source.count("do_sample=False") == 5, (
+        "every model call must be deterministic"
     )
 
 
