@@ -176,7 +176,8 @@ def test_answer_receives_entity_linked_context():
     user_query, output, code_plausible = engine.answer_args
     assert user_query == "diagnostic mammogram"
     assert output["cpt_list"] == ["77065"]
-    assert code_plausible["filters_used"]["hospitals"] == ["upmc presbyterian"]
+    # The model said "UPMC Presbyterian"; the resolver adopted the file's spelling.
+    assert code_plausible["filters_used"]["hospitals"] == ["upmc presbyterian shadyside"]
 
 
 def test_pipeline_passes_the_mrf_vocabulary_to_the_categorizer():
@@ -200,6 +201,32 @@ def test_vocabulary_is_computed_once():
 
     assert pipeline.hospital_names() is pipeline.hospital_names()
     assert pipeline.payer_names() is pipeline.payer_names()
+
+
+def test_category_words_and_near_misses_are_fixed_before_filtering():
+    """The reported failure: hospital ['hospital'], insurer a near miss.
+
+    "hospital" is a category word, not a facility, and the filter is a substring
+    match — left alone it silently selects an arbitrary slice of the file or
+    nothing at all.
+    """
+    pipeline, _, engine = make_pipeline(
+        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []},
+        categorization={
+            "medical": ["colonoscopy"],
+            "hospital": ["hospital"],
+            "insurer": ["UPMC Plan"],
+            "medication": [],
+        },
+    )
+
+    pipeline.run("colonoscopy", verbose=False)
+
+    _, _, code_plausible = engine.answer_args
+    filters = code_plausible["filters_used"]
+
+    assert filters["hospitals"] == []
+    assert filters["insurers"] == ["upmc health plan"]
 
 
 def test_top_k_is_forwarded_to_the_retriever():

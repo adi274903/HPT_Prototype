@@ -38,6 +38,24 @@ def test_categorizer_prompt_is_unchanged_without_known_values():
     assert "Known entries" not in build_categorizer_prompt("q")
 
 
+def test_categorizer_prompt_no_longer_asks_for_generic_references():
+    """It used to say: include generic references such as "my hospital"."""
+    prompt = build_categorizer_prompt("q")
+
+    assert "Include generic references" not in prompt
+    assert "Never emit a generic word" in prompt
+
+
+def test_categorizer_prompt_shows_a_query_that_names_no_facility():
+    """The failing case, taught as an example: hospital stays empty."""
+    prompt = build_categorizer_prompt("q")
+
+    assert "Which hospital should I go to for a colonoscopy?" in prompt
+    assert "Asking *which*" in prompt
+    # The old example taught that "Houston Hospital" is a hospital entity.
+    assert "Houston Hospital" not in prompt
+
+
 def test_every_model_call_sets_an_explicit_token_budget():
     """The categorizer must not inherit the pipe's 256-token default.
 

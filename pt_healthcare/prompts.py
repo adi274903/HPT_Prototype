@@ -60,7 +60,13 @@ def build_categorizer_prompt(
     - Use an empty list when no entity exists in a category.
     - Do not infer entities that were not stated.
     - Normalize obvious capitalization while preserving proper names.
-    - Include generic references such as "my hospital" and "my insurance" if present.
+    - Only extract a hospital or an insurer that the query actually names or
+      otherwise identifies. A bare category word is not an entity: "what hospital
+      should I go to" and "does my insurance cover this" name neither, so those
+      lists stay empty.
+    - Never emit a generic word such as "hospital", "clinic", "doctor",
+      "provider", "insurance", "my hospital", "my insurance" or "my plan" as an
+      entity. Those never match a real entry in the price file.
 
     Examples:
 
@@ -92,14 +98,17 @@ def build_categorizer_prompt(
     }}
 
 
-    Query: How much would Houston Hospital cost me for colonsocopy?
+    Query: Which hospital should I go to for a colonoscopy?
     Output:
     {{
       "medical": ["colonoscopy"],
-      "hospital": ["Houston Hospital"],
+      "hospital": [],
       "insurer": [],
       "medication" : []
     }}
+
+    "hospital" is empty because the query names no facility. Asking *which*
+    hospital you should use is not naming one.
 
     Now classify this query:
 

@@ -262,11 +262,40 @@ plan?", it spends a paragraph deciding whether to emit the literal string
 plan"`) verbatim. That name then matches nothing downstream, because the price
 filter is a case-insensitive *substring* match against `payer_name`.
 
-So the pipeline hands the categorizer the distinct `hospital_name` and
-`payer_name` values from the MRF (via `pipeline.hospital_names()` /
-`.payer_names()`, computed once and cached). Extraction becomes slot-filling
-against a closed set rather than free invention, and a loose or misspelled
-reference can be resolved to the real entry.
+Two bugs in the categorizer prompt caused most of this, and both were inherited
+from the prototype:
+
+- a rule that *asked* for it — `Include generic references such as "my hospital"
+  and "my insurance" if present` — so `"hospital"` came back as an entity;
+- an example, `Query: How much would Houston Hospital cost me for colonsocopy?`
+  → `"hospital": ["Houston Hospital"]`, which teaches that a token ending in
+  "Hospital" is a facility. "What hospital should I go to" pattern-matches
+  straight into it.
+
+Both are now replaced with the opposite guidance and a worked example showing
+`"hospital": []` for a query that asks *which* hospital but names none.
+
+Because a 4B model will still normalise loosely, there are three guards:
+
+1. **The vocabulary goes into the prompt** — the distinct `hospital_name` /
+   `payer_name` values from the MRF (`pipeline.hospital_names()` /
+   `.payer_names()`, computed once and cached), so extraction is slot-filling
+   instead of free invention.
+2. **`drop_placeholders`** removes bare category words outright. `"hospital"` is
+   not a name, and as a substring match it silently selects an arbitrary slice of
+   the file or nothing at all.
+3. **`resolve_to_vocabulary`** snaps near misses onto real entries — exact match,
+   then unique substring either way (`"highmark"` → `"Highmark BCBS of PA"`,
+   `"UPMC Presbyterian"` → `"Upmc Presbyterian Shadyside"`), then one clear fuzzy
+   winner. Genuinely ambiguous terms are left alone: guessing between two UPMC
+   payers is worse than reporting what the model produced.
+
+Every correction is logged, so you can see it happen:
+
+```
+Insurers resolved to price-file entries: ['highmark plan'] -> ['Highmark BCBS of PA']
+Hospitals resolved to price-file entries: ['hospital'] -> []
+```
 
 The lists are bounded (`vocabulary.DEFAULT_LIMIT`, 300) and cost little prompt
 space; with no MRF loaded the block is omitted and the prompt is byte-identical

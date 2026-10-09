@@ -24,7 +24,7 @@ import pandas as pd
 from . import config
 from .pricing import sql_answer
 from .utils import clean_list
-from .vocabulary import column_vocabulary
+from .vocabulary import column_vocabulary, drop_placeholders, resolve_to_vocabulary
 
 # A display hook receives a DataFrame and returns nothing.
 DisplayHook = Callable[[pd.DataFrame], None]
@@ -261,11 +261,37 @@ class HealthcarePricingPipeline:
 
         t0 = time.perf_counter()
 
+        # Two corrections to the model's entity names, before they become filters.
+        #
+        # 1. A bare category word ("hospital", "my insurance") is not a name. As a
+        #    substring match it can quietly select an arbitrary slice of the file,
+        #    so drop it rather than let it constrain the query.
+        # 2. That filter is a substring match, so a near miss is a total miss:
+        #    "Highmark Plan" does not match "Highmark BCBS of PA", and the query
+        #    comes back with no rows. Snap what is recognisable onto the real value.
+        raw_hospitals = list(categorized["hospital"] or [])
+        raw_insurers = list(categorized["insurer"] or [])
+
+        hospitals = resolve_to_vocabulary(
+            drop_placeholders(raw_hospitals, "hospital"),
+            self.hospital_names(),
+        )
+        insurers = resolve_to_vocabulary(
+            drop_placeholders(raw_insurers, "insurer"),
+            self.payer_names(),
+        )
+
+        if hospitals != raw_hospitals:
+            log(f"Hospitals resolved to price-file entries: {raw_hospitals} -> {hospitals}")
+
+        if insurers != raw_insurers:
+            log(f"Insurers resolved to price-file entries: {raw_insurers} -> {insurers}")
+
         code_plausible = sql_answer(
             cpt_list=output["cpt_list"],
             hcpcs_list=output["hcpcs_list"],
-            insurance_list=categorized["insurer"],
-            hospital_list=categorized["hospital"],
+            insurance_list=insurers,
+            hospital_list=hospitals,
             mrf_data=self.mrf_data,
         )
 
