@@ -146,6 +146,12 @@ result = pipeline.run(
 print(result["answer"])
 ```
 
+Forgot step 1? `setup()` checks for the runtime packages and installs any that
+are missing inside Colab (mirroring the notebook's first cell). Pass
+`install=False` to forbid that, or `install=True` to force it; either way a
+missing package raises a `RuntimeError` naming the packages and the command,
+rather than a `ModuleNotFoundError` from deep inside the stack.
+
 One-liner instead of steps 2–3:
 
 ```python

@@ -64,7 +64,7 @@ import sys
 import time
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # --- make the sibling package importable when running from the repo root ----
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -150,6 +150,99 @@ def install_dependencies(
         command.append("-q")
 
     return subprocess.call(command)
+
+
+#: (import name, pip name) for everything the pipeline needs at runtime.
+REQUIRED_PACKAGES: Sequence[Tuple[str, str]] = (
+    ("huggingface_hub", "huggingface_hub"),
+    ("transformers", "transformers"),
+    ("torch", "torch"),
+    ("sentence_transformers", "sentence-transformers"),
+    ("qdrant_client", "qdrant-client"),
+    ("pandas", "pandas"),
+    ("numpy", "numpy"),
+    ("dotenv", "python-dotenv"),
+)
+
+REQUIREMENTS_FILE = os.path.join(_REPO_ROOT, "requirements.txt")
+
+
+def missing_dependencies() -> List[str]:
+    """Pip names of the runtime packages that are not importable right now."""
+    import importlib.util
+
+    missing: List[str] = []
+
+    for module_name, package_name in REQUIRED_PACKAGES:
+        try:
+            spec = importlib.util.find_spec(module_name)
+        except (ImportError, ValueError):
+            spec = None
+
+        if spec is None:
+            missing.append(package_name)
+
+    return missing
+
+
+def install_requirements(
+    packages: Optional[Sequence[str]] = None,
+    quiet: bool = True,
+) -> int:
+    """``pip install -r requirements.txt``, or just ``packages`` if the file is gone."""
+    if packages is None and os.path.isfile(REQUIREMENTS_FILE):
+        command = [sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS_FILE]
+    else:
+        command = [sys.executable, "-m", "pip", "install", *(packages or [])]
+
+    if quiet:
+        command.append("-q")
+
+    return subprocess.call(command)
+
+
+def ensure_dependencies(
+    auto_install: Optional[bool] = None,
+    quiet: bool = True,
+) -> List[str]:
+    """Make sure the runtime packages are importable.
+
+    Returns the packages that were missing (and installed, when allowed).
+    ``auto_install=None`` means "yes inside Colab, no elsewhere", which matches
+    the notebook, whose first cell was the ``!pip install`` line.
+
+    Raises a plain ``RuntimeError`` with the fix in it rather than letting a
+    ``ModuleNotFoundError`` surface from three frames down.
+    """
+    if auto_install is None:
+        auto_install = in_colab()
+
+    missing = missing_dependencies()
+
+    if not missing:
+        return []
+
+    if not auto_install:
+        raise RuntimeError(
+            "Missing runtime packages: " + ", ".join(missing) + "\n"
+            "Install them first, from the repo root:\n"
+            "    !pip install -q -r requirements.txt\n"
+            "or call colab_run.setup(install=True)."
+        )
+
+    print("Installing missing packages: " + ", ".join(missing))
+    install_requirements(quiet=quiet)
+
+    still_missing = missing_dependencies()
+
+    if still_missing:
+        raise RuntimeError(
+            "Still missing after installing: " + ", ".join(still_missing) + "\n"
+            "In Colab this normally means the runtime has to be restarted "
+            "(Runtime -> Restart session) once the install finishes."
+        )
+
+    return missing
 
 
 def load_env(
@@ -297,6 +390,7 @@ def build_pipeline(
     top_k: Optional[int] = None,
     login: bool = True,
     token: Optional[str] = None,
+    install: Optional[bool] = None,
 ) -> HealthcarePricingPipeline:
     """Load models + data and return a ready-to-run pipeline.
 
@@ -310,6 +404,7 @@ def build_pipeline(
     Paths resolve as explicit argument -> env (``PT_MRF_CSV`` / ``PT_QDRANT_PATH``,
     including anything from a ``.env``) -> the Colab Drive default.
     """
+    ensure_dependencies(install)
     load_env()
 
     if login:
@@ -331,7 +426,7 @@ def build_pipeline(
 
 
 def setup(
-    install: bool = False,
+    install: Optional[bool] = None,
     mount: bool = True,
     stage: bool = True,
     device: str = "cuda",
@@ -352,9 +447,13 @@ def setup(
     ``env_file`` points at a specific ``.env``; otherwise the working directory,
     ``/content`` and the repo root are searched, and any ``PT_*`` value found
     there wins over the built-in defaults.
+
+    ``install`` controls what happens when runtime packages are missing:
+    ``None`` (default) installs them automatically inside Colab and raises
+    otherwise; ``True`` always installs; ``False`` never does, raising a
+    ``RuntimeError`` that names the packages and the command instead.
     """
-    if install:
-        install_dependencies()
+    ensure_dependencies(install, quiet=not verbose)
 
     # Honour a .env — wherever it lives — before anything reads a path.
     load_env(env_file, verbose=verbose)
@@ -378,6 +477,7 @@ def setup(
         device=device,
         top_k=top_k,
         token=token,
+        install=False,  # already ensured above
     )
 
 

@@ -177,3 +177,52 @@ def test_load_env_reads_a_file_outside_this_repo(tmp_path, monkeypatch):
 
     monkeypatch.delenv("PT_MRF_CSV", raising=False)
     config.refresh()  # leave the module snapshot as we found it
+
+
+def test_missing_dependencies_reports_absent_modules(monkeypatch):
+    monkeypatch.setattr(
+        colab_run,
+        "REQUIRED_PACKAGES",
+        (("pandas", "pandas"), ("definitely_not_installed_xyz", "definitely-not-installed-xyz")),
+    )
+
+    assert colab_run.missing_dependencies() == ["definitely-not-installed-xyz"]
+
+
+def test_ensure_dependencies_is_a_noop_when_everything_is_present(monkeypatch):
+    monkeypatch.setattr(colab_run, "REQUIRED_PACKAGES", (("pandas", "pandas"),))
+
+    assert colab_run.ensure_dependencies(auto_install=False) == []
+
+
+def test_ensure_dependencies_raises_with_the_fix_in_the_message(monkeypatch):
+    """Not a ModuleNotFoundError three frames down — a RuntimeError naming the fix."""
+    monkeypatch.setattr(colab_run, "missing_dependencies", lambda: ["qdrant-client"])
+
+    with pytest.raises(RuntimeError, match="pip install -q -r requirements.txt"):
+        colab_run.ensure_dependencies(auto_install=False)
+
+
+def test_ensure_dependencies_installs_when_allowed(monkeypatch):
+    state = {"missing": ["qdrant-client"]}
+    calls = []
+
+    monkeypatch.setattr(colab_run, "missing_dependencies", lambda: state["missing"])
+
+    def fake_install(packages=None, quiet=True):
+        calls.append(packages)
+        state["missing"] = []
+        return 0
+
+    monkeypatch.setattr(colab_run, "install_requirements", fake_install)
+
+    assert colab_run.ensure_dependencies(auto_install=True) == ["qdrant-client"]
+    assert calls == [None]  # None -> "pip install -r requirements.txt"
+
+
+def test_ensure_dependencies_asks_for_a_restart_if_still_missing(monkeypatch):
+    monkeypatch.setattr(colab_run, "missing_dependencies", lambda: ["torch"])
+    monkeypatch.setattr(colab_run, "install_requirements", lambda packages=None, quiet=True: 0)
+
+    with pytest.raises(RuntimeError, match="Restart session"):
+        colab_run.ensure_dependencies(auto_install=True)
