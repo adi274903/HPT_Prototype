@@ -1,0 +1,19 @@
+{
+  "name": "pt-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript front end for the CMU-NIST AIMSEC hospital price-transparency agent (runs inside a Colab notebook).",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node build.mjs",
+    "serve": "node build.mjs && node devserver.mjs --mock",
+    "verify": "node build.mjs && tsc --noEmit && node tools/verify_dom.mjs && node tools/verify_patient.mjs && python3 tools/verify_colab.py && node tools/verify_e2e.mjs",
+    "demo": "python3 tools/gen_demo.py"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^30.1.2",
+    "typescript": "^5.7.0"
+  }
+}

@@ -22,33 +22,50 @@ stdout (`STEP 4/7 — …`, `Decision completed in 86.56s`, `MRF rows matched: N
 output:`). `pt_healthcare.pipeline` preserves those strings verbatim, so the UI
 cannot drift from the backend's behaviour.
 
-This copy is **byte-identical** to the source of truth
+## Where the front end actually lives now
+
+The front-end project is vendored into this repo at `ui/frontend/` — sources,
+build and verification tooling together:
 
 ```
-~/projects/reseearch_work/Price_Transparency/frontend/colab/pt_serve.py
+ui/frontend/src/         TypeScript sources for both pages
+ui/frontend/colab/       the server source
+ui/frontend/tools/       verify_dom / verify_patient / verify_colab / verify_e2e
+ui/frontend/build.mjs    esbuild bundle -> ui/frontend/dist/*.html
 ```
 
-(verify: `sha256sum ui/pt_serve.py`). Two consequences:
+This was not always so. The front end used to live only at
 
-- The front-end repo's own test suite still covers exactly this file.
-- If you change `pt_serve.py` here, you have forked it — port the change back.
+```
+~/projects/reseearch_work/Price_Transparency/frontend
+```
+
+which is a git repository with **no remote**, with `frontend/` left **untracked** —
+so nothing there was versioned or pushable and a change could be lost without
+trace. That directory is still where edits are made day to day, but this repo is
+now the durable, pullable copy: `ui/frontend/` is the source of truth for anything
+you can clone.
+
+`ui/*.html` are the built pages `serve_ui()` serves, copied from
+`ui/frontend/dist/*.html`. The flat layout is deliberate — `pt_serve.py` resolves
+pages relative to itself, and `colab_run.serve_ui()` passes both paths explicitly.
+`dist/` is gitignored, so the tracked copies are the ones directly under `ui/`.
 
 ## Rebuilding the pages
 
 The pages are build artifacts, not sources. Sources live in the front-end repo:
 
 ```bash
-cd ~/projects/reseearch_work/Price_Transparency/frontend
+cd ui/frontend
 npm install
 npm run build      # -> dist/pt_patient.html, dist/pt_frontend.html
-npm run verify     # typecheck + DOM suites + API + e2e
+npm run verify     # typecheck + DOM suites + API + e2e (259 checks)
 ```
 
-Then copy back:
+Then copy the built pages up, next to the server that serves them:
 
 ```bash
-cp dist/pt_patient.html dist/pt_frontend.html \
-   ~/projects/workspace2/project/PT_Healthcare/ui/
+cp ui/frontend/dist/pt_patient.html ui/frontend/dist/pt_frontend.html ui/
 ```
 
 `pt_serve.py` resolves pages relative to itself, but `colab_run.serve_ui()`
