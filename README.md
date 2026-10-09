@@ -7,9 +7,10 @@ The prototype answers patient questions about **what a medical service might
 cost**, by combining:
 
 1. **Entity extraction** — MedGemma classifies a free-text query into
-   `medical` / `hospital` / `insurer` / `medication` entities. The hospital and
-   payer names are chosen from the values that actually exist in the MRF (see
-   [Closed vocabulary](#closed-vocabulary-for-the-categorizer)), not invented.
+   `medical` / `hospital` / `insurer` / `medication` entities. The model emits the
+   query's own wording; `resolve_to_vocabulary()` then snaps a near miss onto the
+   real value in the MRF (see [Why the categorizer prompt is
+   short](#why-the-categorizer-prompt-is-short)).
 2. **Semantic code retrieval** — a MedTE sentence embedder searches two Qdrant
    collections (`cpt_medte`, `hcpcs_medte`) for candidate **CPT** / **HCPCS** codes.
 3. **Code decision** — MedGemma picks a small, plausible subset of the retrieved codes.
@@ -19,6 +20,21 @@ cost**, by combining:
    hospital **MRF** (machine-readable file) DataFrame.
 6. **Answer generation** — MedGemma writes a patient-friendly, non-committal answer
    grounded in the matched price rows.
+
+## What it looks like
+
+![The patient page: a grounded answer beside its evidence pane](docs/patient-page.png)
+
+A real run of `Cost of colonoscopy at UPMC Presby?`. The answer names the procedure
+and the code it was priced on, gives the gross and discounted-cash figures, and
+cites the rows behind each number. The evidence pane lists the 39 matching MRF
+records — 19 of them with a negotiated rate — across every payer in the file, with
+methodology attached and a click-to-resort header.
+
+Two things worth pointing at. The answer is **grounded**: every figure traces to a
+published row. And it is deliberately **non-committal** about what the patient will
+actually pay, because that depends on the specific plan rather than on the range of
+rates in the file.
 
 ## Repository layout
 
@@ -38,6 +54,7 @@ PT_Healthcare/
 │   └── cli.py                # command-line entry point
 ├── colab_run.py              # Colab runner: pip/drive/tar glue + UI serving + tunnel
 ├── ui/                       # TypeScript front end (2 pages) + pt_serve.py server
+├── docs/patient-page.png     # the screenshot above
 ├── scripts/download_db.sh    # fetch + extract the Qdrant snapshot
 ├── examples/run_pipeline.py  # minimal end-to-end example
 ├── tests/                    # pytest suite for every pure component
@@ -253,71 +270,59 @@ one payload contract regardless of transport.
 Verified against the front-end's own suite (259 checks) with both the polling
 server and its mock backend.
 
-### Closed vocabulary for the categorizer
+### Why the categorizer prompt is short
 
-Step 1 is open-ended NER, which is why it misbehaves on real queries: asked
-"what hospital should I go to for my colonoscopy if I have my *Higmark BCBS*
-plan?", it spends a paragraph deciding whether to emit the literal string
-`"hospital"` as a placeholder, and it returns the user's typo (`"Higmark BCBS
-plan"`) verbatim. That name then matches nothing downstream, because the price
-filter is a case-insensitive *substring* match against `payer_name`.
+Step 1 is open-ended NER, which is why it misbehaves on real queries. Two bugs came
+straight from the prototype:
 
-Two bugs in the categorizer prompt caused most of this, and both were inherited
-from the prototype:
+- a rule that *asked* for placeholders — `Include generic references such as "my
+  hospital" and "my insurance" if present` — so `"hospital"` came back as an entity;
+- an example, `Query: How much would Houston Hospital cost me for colonsocopy?` →
+  `"hospital": ["Houston Hospital"]`, which teaches that a token ending in
+  "Hospital" is a facility. "What hospital should I go to" pattern-matches straight
+  into it.
 
-- a rule that *asked* for it — `Include generic references such as "my hospital"
-  and "my insurance" if present` — so `"hospital"` came back as an entity;
-- an example, `Query: How much would Houston Hospital cost me for colonsocopy?`
-  → `"hospital": ["Houston Hospital"]`, which teaches that a token ending in
-  "Hospital" is a facility. "What hospital should I go to" pattern-matches
-  straight into it.
+Both are gone, replaced by the opposite rule and an example where a query asking
+*which* hospital returns an empty list.
 
-Both are now replaced with the opposite guidance and a worked example showing
-`"hospital": []` for a query that asks *which* hospital but names none.
+The next attempt was to hand the model the real names — the distinct `hospital_name`
+/ `payer_name` values from the MRF, listed inline so extraction became slot-filling.
+That was a mistake, and it cost two things:
 
-Because a 4B model will still normalise loosely, there are three guards:
+- **about 280 tokens** of names in a prompt that had grown to 4806 characters and
+  153 lines. "Cost of colonoscopy at UPMC Presby?" came back with `medical: []` —
+  the procedure, the single most obvious entity in the query, dropped;
+- **a structural trap**: two categories held an enumerated list and two did not, so
+  the model filled the listed ones and left the unlisted one empty.
 
-1. **The vocabulary goes into the prompt** — the distinct `hospital_name` /
-   `payer_name` values from the MRF (`pipeline.hospital_names()` /
-   `.payer_names()`, computed once and cached), so extraction is slot-filling
-   instead of free invention.
-2. **`drop_placeholders`** removes bare category words outright. `"hospital"` is
-   not a name, and as a substring match it silently selects an arbitrary slice of
-   the file or nothing at all.
-3. **`resolve_to_vocabulary`** snaps near misses onto real entries — exact match,
-   then unique substring either way (`"highmark"` → `"Highmark BCBS of PA"`,
-   `"UPMC Presbyterian"` → `"Upmc Presbyterian Shadyside"`), then one clear fuzzy
-   winner. Genuinely ambiguous terms are left alone: guessing between two UPMC
-   payers is worse than reporting what the model produced.
+The prompt is now **1903 characters, 50 lines, four one-line examples**, and nothing
+in it names a hospital or a payer. A test fails if it exceeds 2200 characters or 60
+lines, so the size cannot creep back.
+
+Matching moved into code, where it is deterministic and visible:
+
+- **`drop_placeholders`** removes bare category words outright. `"hospital"` is not
+  a name, and as a substring match it silently selects an arbitrary slice of the
+  file or nothing at all.
+- **`resolve_to_vocabulary`** snaps a near miss onto a real entry — exact match,
+  then a unique substring in either direction (`"UPMC Presby"` → `"Upmc
+  Presbyterian Shadyside"`, `"Higmark BCBS plan"` → `"Highmark BCBS of PA"`), then
+  one clear fuzzy winner.
+- an abbreviation shared by several entries (`"UPMC Presby"` against
+  `"...Shadyside"` and `"...South"`) is **left alone** rather than guessed. The
+  fuzzy pass must not decide it: `SequenceMatcher`'s ratio penalises length, so it
+  prefers the shorter candidate and picks the wrong facility. Left intact, the
+  substring filter matches all of them — a superset rather than a wrong single
+  choice.
 
 Every correction is logged, so you can see it happen:
 
 ```
-Insurers resolved to price-file entries: ['highmark plan'] -> ['Highmark BCBS of PA']
-Hospitals resolved to price-file entries: ['hospital'] -> []
+Hospitals resolved to price-file entries: ['UPMC Presby'] -> ['Upmc Presbyterian Shadyside']
 ```
 
-The lists are bounded (`vocabulary.DEFAULT_LIMIT`, 300) and cost little prompt
-space; with no MRF loaded the block is omitted and the prompt is byte-identical
-to the prototype's. Same shape as the code side: the decision step has always
-chosen CPT/HCPCS codes from the retrieved candidates rather than inventing them.
-
-```
-Known entries in the published price file. When the query refers to one of
-these, return the exact string from the list below — matching loosely, since a
-misspelling, an abbreviation or a partial name still refers to an entry. Do not
-invent a name, and never return the list itself: only what the query actually
-refers to.
-
-hospitals (12):
-- Upmc Altoona
-- Upmc Bedford
-...
-insurers (9):
-- Aetna
-- Highmark BCBS of PA
-...
-```
+Same shape as the code side: step 4 has always chosen CPT/HCPCS codes from the
+retrieved candidates rather than inventing them.
 
 ### Watch what the backend is doing
 
