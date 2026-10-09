@@ -17,13 +17,14 @@ same pipeline works in a notebook, a CLI or a test.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import pandas as pd
 
 from . import config
 from .pricing import sql_answer
 from .utils import clean_list
+from .vocabulary import column_vocabulary
 
 # A display hook receives a DataFrame and returns nothing.
 DisplayHook = Callable[[pd.DataFrame], None]
@@ -51,6 +52,25 @@ class HealthcarePricingPipeline:
         self.top_k = config.top_k() if top_k is None else top_k
         self.printer = printer
         self.display_fn = display_fn or _default_display
+
+        # Distinct hospitals/payers from the MRF, computed on first use and then
+        # reused: they are injected into the categorizer prompt as a closed
+        # vocabulary.
+        self._hospitals: Optional[List[str]] = None
+        self._payers: Optional[List[str]] = None
+
+    # ------------------------------------------------------------------
+    def hospital_names(self) -> List[str]:
+        """Distinct hospital names in the MRF (cached)."""
+        if self._hospitals is None:
+            self._hospitals = column_vocabulary(self.mrf_data, "hospital_name")
+        return self._hospitals
+
+    def payer_names(self) -> List[str]:
+        """Distinct payer names in the MRF (cached)."""
+        if self._payers is None:
+            self._payers = column_vocabulary(self.mrf_data, "payer_name")
+        return self._payers
 
     # ------------------------------------------------------------------
     def run(self, user_query: str, verbose: bool = True) -> Dict[str, Any]:
@@ -92,7 +112,11 @@ class HealthcarePricingPipeline:
 
         t0 = time.perf_counter()
 
-        raw_categorization = self.engine.categorize(user_query)
+        raw_categorization = self.engine.categorize(
+            user_query,
+            hospitals=self.hospital_names(),
+            insurers=self.payer_names(),
+        )
 
         log("\nRaw categorizer output:")
         log(repr(raw_categorization))

@@ -10,14 +10,28 @@ Cells: 15 (categorizer), 17 (decision), 18 (answer).
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from . import config
 from .parsing import compact_candidates
+from .vocabulary import vocabulary_block
 
 
-def build_categorizer_prompt(user_query: str) -> str:
-    """Entity-extraction prompt: query -> JSON with medical/hospital/insurer/medication."""
+def build_categorizer_prompt(
+    user_query: str,
+    hospitals: Optional[Sequence[str]] = None,
+    insurers: Optional[Sequence[str]] = None,
+) -> str:
+    """Entity-extraction prompt: query -> JSON with medical/hospital/insurer/medication.
+
+    ``hospitals`` / ``insurers`` are the known values from the published price
+    file. Supplying them replaces open-ended NER with slot-filling, which is what
+    the downstream substring filters need — and it stops the model substituting a
+    placeholder like "hospital" for a facility it cannot name. Omit them and the
+    prompt is exactly the prototype's.
+    """
+    known = vocabulary_block(list(hospitals or []), list(insurers or []))
+
     return f"""You are a healthcare-query entity classifier and NER extractor.
 
     Analyze the user's query and extract entities into these categories:
@@ -29,7 +43,7 @@ def build_categorizer_prompt(user_query: str) -> str:
       groups, laboratories, imaging centers, pharmacies, or other providers/facilities.
     - insurer: Health insurance companies, payers, Medicare, Medicaid, insurance
       plans, PBMs, prior-authorization organizations, or claims administrators.
-
+{known}
     Return ONLY valid JSON. Do not explain. Do not add Markdown fences.
 
     Use exactly this schema:

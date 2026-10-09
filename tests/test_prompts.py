@@ -18,6 +18,26 @@ def test_categorizer_prompt_embeds_query_and_schema():
     assert "Return ONLY valid JSON" in prompt
 
 
+def test_categorizer_prompt_includes_known_values_when_given():
+    prompt = build_categorizer_prompt(
+        "colonsocopy with my Higmark BCBS plan",
+        hospitals=["Upmc Presbyterian Shadyside"],
+        insurers=["Highmark BCBS of PA"],
+    )
+
+    assert "- Highmark BCBS of PA" in prompt
+    assert "- Upmc Presbyterian Shadyside" in prompt
+    assert "hospitals (1):" in prompt
+    assert "insurers (1):" in prompt
+    assert "colonsocopy with my Higmark BCBS plan" in prompt
+
+
+def test_categorizer_prompt_is_unchanged_without_known_values():
+    """No MRF means the prompt is byte-identical to the prototype's."""
+    assert build_categorizer_prompt("q") == build_categorizer_prompt("q", [], [])
+    assert "Known entries" not in build_categorizer_prompt("q")
+
+
 def test_every_model_call_sets_an_explicit_token_budget():
     """The categorizer must not inherit the pipe's 256-token default.
 

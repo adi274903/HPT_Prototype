@@ -54,8 +54,10 @@ class FakeEngine:
         self.categorization = categorization
         self.decision = decision
         self.answer_args = None
+        self.categorize_args = None
 
-    def categorize(self, user_query):
+    def categorize(self, user_query, hospitals=(), insurers=()):
+        self.categorize_args = (user_query, list(hospitals), list(insurers))
         return json.dumps(self.categorization)
 
     def decide(self, categorization, user_query):
@@ -175,6 +177,29 @@ def test_answer_receives_entity_linked_context():
     assert user_query == "diagnostic mammogram"
     assert output["cpt_list"] == ["77065"]
     assert code_plausible["filters_used"]["hospitals"] == ["upmc presbyterian"]
+
+
+def test_pipeline_passes_the_mrf_vocabulary_to_the_categorizer():
+    """The categorizer picks from what exists, instead of inventing names."""
+    pipeline, _, engine = make_pipeline(
+        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
+    )
+
+    pipeline.run("diagnostic mammogram", verbose=False)
+
+    user_query, hospitals, insurers = engine.categorize_args
+    assert user_query == "diagnostic mammogram"
+    assert hospitals == ["Upmc Childrens", "Upmc Presbyterian Shadyside"]
+    assert insurers == ["Aetna", "UPMC Health Plan"]
+
+
+def test_vocabulary_is_computed_once():
+    pipeline, _, _ = make_pipeline(
+        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
+    )
+
+    assert pipeline.hospital_names() is pipeline.hospital_names()
+    assert pipeline.payer_names() is pipeline.payer_names()
 
 
 def test_top_k_is_forwarded_to_the_retriever():

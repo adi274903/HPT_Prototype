@@ -7,7 +7,9 @@ The prototype answers patient questions about **what a medical service might
 cost**, by combining:
 
 1. **Entity extraction** — MedGemma classifies a free-text query into
-   `medical` / `hospital` / `insurer` / `medication` entities.
+   `medical` / `hospital` / `insurer` / `medication` entities. The hospital and
+   payer names are chosen from the values that actually exist in the MRF (see
+   [Closed vocabulary](#closed-vocabulary-for-the-categorizer)), not invented.
 2. **Semantic code retrieval** — a MedTE sentence embedder searches two Qdrant
    collections (`cpt_medte`, `hcpcs_medte`) for candidate **CPT** / **HCPCS** codes.
 3. **Code decision** — MedGemma picks a small, plausible subset of the retrieved codes.
@@ -250,6 +252,43 @@ one payload contract regardless of transport.
 
 Verified against the front-end's own suite (259 checks) with both the polling
 server and its mock backend.
+
+### Closed vocabulary for the categorizer
+
+Step 1 is open-ended NER, which is why it misbehaves on real queries: asked
+"what hospital should I go to for my colonoscopy if I have my *Higmark BCBS*
+plan?", it spends a paragraph deciding whether to emit the literal string
+`"hospital"` as a placeholder, and it returns the user's typo (`"Higmark BCBS
+plan"`) verbatim. That name then matches nothing downstream, because the price
+filter is a case-insensitive *substring* match against `payer_name`.
+
+So the pipeline hands the categorizer the distinct `hospital_name` and
+`payer_name` values from the MRF (via `pipeline.hospital_names()` /
+`.payer_names()`, computed once and cached). Extraction becomes slot-filling
+against a closed set rather than free invention, and a loose or misspelled
+reference can be resolved to the real entry.
+
+The lists are bounded (`vocabulary.DEFAULT_LIMIT`, 300) and cost little prompt
+space; with no MRF loaded the block is omitted and the prompt is byte-identical
+to the prototype's. Same shape as the code side: the decision step has always
+chosen CPT/HCPCS codes from the retrieved candidates rather than inventing them.
+
+```
+Known entries in the published price file. When the query refers to one of
+these, return the exact string from the list below — matching loosely, since a
+misspelling, an abbreviation or a partial name still refers to an entry. Do not
+invent a name, and never return the list itself: only what the query actually
+refers to.
+
+hospitals (12):
+- Upmc Altoona
+- Upmc Bedford
+...
+insurers (9):
+- Aetna
+- Highmark BCBS of PA
+...
+```
 
 ### Watch what the backend is doing
 

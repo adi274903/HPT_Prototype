@@ -8,7 +8,7 @@ prototype.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from . import config
 from .prompts import (
@@ -27,8 +27,17 @@ class MedGemmaEngine:
     # ------------------------------------------------------------------
     # 1. Entity extraction  (notebook cell 15)
     # ------------------------------------------------------------------
-    def categorize(self, user_query: str) -> str:
+    def categorize(
+        self,
+        user_query: str,
+        hospitals: Optional[Sequence[str]] = None,
+        insurers: Optional[Sequence[str]] = None,
+    ) -> str:
         """Run the categorizer prompt and return the raw assistant text.
+
+        ``hospitals`` / ``insurers`` are the known values from the published price
+        file; passing them makes extraction a choice from a closed set instead of
+        free invention.
 
         ``max_new_tokens`` is passed explicitly. The pipe's own default is 256,
         and MedGemma is a thinking model: it emits ``<unused94>thought …`` before
@@ -38,7 +47,7 @@ class MedGemmaEngine:
         this too: its log shows ``max_new_tokens (=256)`` for this call and
         ``(=4096)`` for the other two.
         """
-        prompt = build_categorizer_prompt(user_query)
+        prompt = build_categorizer_prompt(user_query, hospitals, insurers)
 
         messages = [
             {
