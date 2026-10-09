@@ -65,6 +65,47 @@ ui.stop()
 
 `/` is the patient chat, `/pipeline` the dashboard; each links to the other.
 
+### Polling transport (`/api/run` + `/api/poll`)
+
+The client's default transport. `POST /api/run` starts a run in a background
+thread and returns `{run: "r1"}`; `GET /api/poll?run=r1&since=N` then returns,
+every ~700ms:
+
+```json
+{
+  "run": "r1", "state": "running|done|error",
+  "lines": ["..."], "next": 42,
+  "stages": [ …all seven stage rows… ],
+  "seconds": null, "error": null, "result": null
+}
+```
+
+`lines` is incremental (`since` is an absolute index); `stages` is sent whole
+each time because it's seven small objects and the client merges by key. When
+`state` becomes `done`, `result` is the same payload `/api/stream` would have
+sent — `colab_run.payload_projection()` routes it through `pt_serve.to_payload`.
+
+Why it exists: `_sse_open` sends `connection: close` and no
+`Transfer-Encoding: chunked`, so the SSE response ends only when the connection
+closes — after the run finishes. A proxy may buffer all of it, which is what a
+Cloudflare quick tunnel does; the page then shows its static bubble forever while
+the backend works. Polling is ordinary request/response, so nothing can strand it.
+That is also why `/logs` works in the same situation.
+
+Stage ticks come from the same log lines, parsed by `colab_run.stage_rows()`.
+Unlike `pt_serve._stages_from_log()` — which finalises everything to `done` — a
+step still being worked on stays `active`, so the UI doesn't tick a step early.
+`tests/test_colab_run.py` asserts the two agree on a real log.
+
+Runs are serialised (`RunManager._run_lock`) because the pipeline juggles
+`sys.stdout` and one GPU. `DELETE`/cancellation isn't implemented: the client
+stops polling and the run finishes server-side.
+
+This is added **without modifying `pt_serve.py`**: `serve()` resolves its
+module-global `_Handler` at call time and dispatches through `self._…`, so
+`colab_run.install_routes()` subclasses it. `/api/stream` and `/api/query` are
+untouched.
+
 ### Backend log pane (`/logs`)
 
 `serve_ui(logs=True)` — the default — adds a third route: a live backend log at

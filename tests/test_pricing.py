@@ -74,10 +74,17 @@ def test_filters_by_code_payer_and_hospital():
 
 
 def test_lowercase_code_input_is_uppercased():
-    result = sql_answer(cpt_list=["g0206"], mrf_data=make_mrf())
+    """G0206 is a HCPCS code, and CPT/HCPCS are separate columns."""
+    as_cpt = sql_answer(cpt_list=["g0206"], mrf_data=make_mrf())
 
-    assert result["match_count"] == 1
-    assert result["filters_used"]["cpt_codes"] == ["G0206"]
+    assert as_cpt["match_count"] == 0
+    assert as_cpt["filters_used"]["cpt_codes"] == ["G0206"]
+
+    as_hcpcs = sql_answer(hcpcs_list=["g0206"], mrf_data=make_mrf())
+
+    assert as_hcpcs["match_count"] == 1
+    assert as_hcpcs["filters_used"]["hcpcs_codes"] == ["G0206"]
+    assert as_hcpcs["matches"].iloc[0]["HCPCS"] == "G0206"
 
 
 def test_hcpcs_filter():

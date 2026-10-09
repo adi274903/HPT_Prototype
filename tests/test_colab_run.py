@@ -8,6 +8,8 @@ need the models and the network.
 import io
 import json
 import sys
+import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -257,17 +259,7 @@ def test_log_buffer_indexes_absolutely_across_eviction():
     assert len(buffer) == 3
 
 
-def test_log_printer_buffers_always_and_only_echoes_under_a_tee(monkeypatch):
-    buffer = colab_run.LogBuffer()
-    echo = io.StringIO()
-    printer = colab_run.log_printer(buffer, echo)
-
-    # No tee: sys.stdout is the real stdout, so print() already reached the
-    # notebook and echoing would duplicate it.
-    printer("one")
-    assert buffer.snapshot(0)[0] == ["one"]
-    assert echo.getvalue() == ""
-
+def test_log_printer_buffers_always_and_only_echoes_under_the_tee(monkeypatch):
     class FakeTee:
         def write(self, _s):
             return len(_s)
@@ -275,11 +267,50 @@ def test_log_printer_buffers_always_and_only_echoes_under_a_tee(monkeypatch):
         def flush(self):
             pass
 
+    buffer = colab_run.LogBuffer()
+    echo = io.StringIO()
+    printer = colab_run.log_printer(buffer, echo, tee_type=FakeTee)
+
+    # Not under the tee: print() already reached the notebook, so echoing would
+    # duplicate every line.
+    printer("one")
+    assert buffer.snapshot(0)[0] == ["one"]
+    assert echo.getvalue() == ""
+
     monkeypatch.setattr(sys, "stdout", FakeTee())
     printer("two")
 
     assert echo.getvalue() == "two\n"
     assert buffer.snapshot(0)[0] == ["one", "two"]
+
+
+def test_log_printer_detects_the_vendored_tee():
+    """A redirection that is not pt_serve's tee must not trigger the echo."""
+    pt_serve = import_pt_serve()
+
+    class NotTheTee:
+        def write(self, _s):
+            return len(_s)
+
+        def flush(self):
+            pass
+
+    echo = io.StringIO()
+    printer = colab_run.log_printer(colab_run.LogBuffer(), echo, tee_type=pt_serve._Tee)
+
+    import sys as _sys
+
+    original = _sys.stdout
+    try:
+        _sys.stdout = NotTheTee()
+        printer("not-a-tee")
+        assert echo.getvalue() == ""
+
+        _sys.stdout = pt_serve._Tee(lambda _line: None)
+        printer("under-the-tee")
+        assert echo.getvalue() == "under-the-tee\n"
+    finally:
+        _sys.stdout = original
 
 
 def test_logging_handler_subclasses_the_vendored_one():
@@ -305,27 +336,48 @@ def test_install_log_routes_swaps_the_handler_pt_serve_uses():
 class _FakePipeline:
     """Just enough pipeline for the server: run(), printer, mrf_data, retriever."""
 
-    def __init__(self):
+    def __init__(self, fail: bool = False):
         self.printer = print
         self.mrf_data = None
         self.top_k = 10
         self.retriever = type("R", (), {"client": None})()
+        self.fail = fail
 
     def run(self, query, verbose=True):
-        self.printer("STEP 1/7 - test")
+        self.printer("=" * 40)
+        self.printer("STEP 1/7 - Extracting medical, hospital, insurer, and medication entities")
+        self.printer(f"User query: {query}")
         self.printer("Categorization completed in 0.01s")
-        return {}
+        self.printer("STEP 7/7 - Generating final user-facing answer")
+        self.printer("Answer generation completed in 0.02s")
+
+        if self.fail:
+            raise RuntimeError("boom")
+
+        return {
+            "categorized": {"medical": ["colonoscopy"], "hospital": [], "insurer": [], "medication": []},
+            "cpt_candidates": [],
+            "hcpcs_candidates": [],
+            "output": {"use_codes": "cpt", "cpt_list": ["45378"], "hcpcs_list": []},
+            "code_plausible": {"match_count": 0, "price_summary": None, "filters_used": {}},
+            "answer": "test answer",
+            "total_seconds": 0.02,
+        }
+
+
+def _start_server(pipeline=None):
+    return colab_run.serve_ui(
+        pipeline=pipeline or _FakePipeline(),
+        tunnel="none",
+        display=False,
+        verbose=False,
+    )
 
 
 def test_serve_ui_exposes_the_log_pane_and_the_log_endpoint():
     fake = _FakePipeline()
 
-    ui = colab_run.serve_ui(
-        pipeline=fake,
-        tunnel="none",
-        display=False,
-        verbose=False,
-    )
+    ui = _start_server(fake)
 
     try:
         base = ui.local_url.rstrip("/")
@@ -347,3 +399,160 @@ def test_serve_ui_exposes_the_log_pane_and_the_log_endpoint():
         assert fake.printer is not print
     finally:
         ui.stop()
+
+
+def _post_json(url, body):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _get_json(url):
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _run_to_completion(base, query, timeout=15):
+    started = _post_json(base + "/api/run", {"query": query})
+    run_id = started["run"]
+
+    deadline = time.time() + timeout
+    payload = None
+
+    while time.time() < deadline:
+        payload = _get_json(f"{base}/api/poll?run={run_id}&since=0")
+        if payload["state"] != "running":
+            return payload
+        time.sleep(0.05)
+
+    raise AssertionError(f"run never finished: {payload}")
+
+
+def test_polling_transport_carries_stages_and_the_payload():
+    ui = _start_server()
+
+    try:
+        base = ui.local_url.rstrip("/")
+        payload = _run_to_completion(base, "Cost of colonoscopy in pittsburgh?")
+
+        assert payload["state"] == "done"
+
+        states = {stage["key"]: stage["state"] for stage in payload["stages"]}
+        assert states["entities"] == "done"
+        assert states["answer"] == "done"
+
+        # The client consumes the same payload contract as /api/stream.
+        assert payload["result"]["mode"] == "live"
+        assert payload["result"]["query"] == "Cost of colonoscopy in pittsburgh?"
+        assert payload["result"]["decision"]["cpt_list"] == ["45378"]
+
+        assert payload["seconds"] is not None
+        assert payload["next"] == len(payload["lines"])
+    finally:
+        ui.stop()
+
+
+def test_polling_transport_reports_new_lines_incrementally():
+    ui = _start_server()
+
+    try:
+        base = ui.local_url.rstrip("/")
+        run_id = _post_json(base + "/api/run", {"query": "colonoscopy"})["run"]
+
+        first = _get_json(f"{base}/api/poll?run={run_id}&since=0")
+        assert first["next"] == len(first["lines"])
+
+        second = _get_json(f"{base}/api/poll?run={run_id}&since={first['next']}")
+        assert second["lines"] == []          # nothing new past the high-water mark
+        assert second["next"] >= first["next"]
+    finally:
+        ui.stop()
+
+
+def test_polling_transport_surfaces_a_failure():
+    ui = _start_server(_FakePipeline(fail=True))
+
+    try:
+        base = ui.local_url.rstrip("/")
+        payload = _run_to_completion(base, "colonoscopy")
+
+        assert payload["state"] == "error"
+        assert "boom" in payload["error"]
+        assert payload["result"] is None
+    finally:
+        ui.stop()
+
+
+def test_polling_rejects_unknown_runs():
+    ui = _start_server()
+
+    try:
+        base = ui.local_url.rstrip("/")
+
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _get_json(base + "/api/poll?run=nope&since=0")
+
+        assert error.value.code == 404
+    finally:
+        ui.stop()
+
+
+def test_polling_rejects_an_empty_query():
+    ui = _start_server()
+
+    try:
+        base = ui.local_url.rstrip("/")
+
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post_json(base + "/api/run", {"query": "   "})
+
+        assert error.value.code == 400
+    finally:
+        ui.stop()
+
+
+def test_stage_rows_agree_with_pt_serve_on_a_real_log():
+    """The polling transport must derive the same stages the SSE path does."""
+    pt_serve = import_pt_serve()
+
+    log = "\n".join(
+        [
+            "STEP 1/7 - Extracting medical, hospital, insurer, and medication entities",
+            "Categorization completed in 13.85s",
+            "STEP 2/7 - Retrieving CPT candidates from Qdrant",
+            "CPT retrieval completed in 0.25s",
+            "MRF rows matched: 95",
+        ]
+    )
+
+    mine = {stage["key"]: stage["seconds"] for stage in colab_run.stage_rows(log.splitlines(), done=True)}
+    theirs = {stage["key"]: stage["seconds"] for stage in pt_serve._stages_from_log(log)}
+
+    assert mine == theirs
+    assert mine["entities"] == 13.85
+    assert mine["cpt"] == 0.25
+
+
+def test_stage_rows_keeps_a_running_step_active():
+    rows = colab_run.stage_rows(
+        [
+            "STEP 1/7 - Extracting",
+            "Categorization completed in 1.00s",
+            "STEP 2/7 - Retrieving CPT candidates from Qdrant",
+        ]
+    )
+    states = {stage["key"]: stage["state"] for stage in rows}
+
+    assert states["entities"] == "done"
+    assert states["cpt"] == "active"      # not ticked early
+    assert states["hcpcs"] == "pending"
+
+    finished = colab_run.stage_rows(
+        ["STEP 1/7 - Extracting", "Categorization completed in 1.00s"], done=True
+    )
+    assert all(stage["state"] == "done" for stage in finished)

@@ -144,7 +144,11 @@ def test_pipeline_rejects_hallucinated_codes():
     assert result["output"]["hcpcs_list"] == []
 
 
-def test_pipeline_passes_through_the_whole_decision_when_all_invalid():
+def test_pipeline_with_no_surviving_codes_falls_back_to_payer_and_hospital():
+    """Carried over from sql_answer, and deliberate: with no code left to filter
+    on, the dataset is not constrained by code at all — only the payer and
+    hospital filters apply. So an all-hallucinated decision still returns rows.
+    """
     pipeline, _, _ = make_pipeline(
         {
             "use_codes": "none",
@@ -156,7 +160,8 @@ def test_pipeline_passes_through_the_whole_decision_when_all_invalid():
     result = pipeline.run("query", verbose=False)
 
     assert result["output"]["cpt_list"] == []
-    assert result["code_plausible"]["match_count"] == 0
+    assert result["code_plausible"]["filters_used"]["cpt_codes"] == []
+    assert result["code_plausible"]["match_count"] == 1  # the UPMC Presbyterian row
 
 
 def test_answer_receives_entity_linked_context():

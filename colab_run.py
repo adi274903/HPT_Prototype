@@ -55,6 +55,7 @@ imports cleanly on a machine without ``google.colab``.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import re
@@ -63,6 +64,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -650,18 +652,26 @@ class LogBuffer:
 def log_printer(
     buffer: Optional[LogBuffer] = None,
     echo: Optional[Any] = None,
+    extra_sink: Optional[Callable[[str], None]] = None,
+    tee_type: Optional[type] = None,
 ) -> Callable[[str], None]:
     """Build the pipeline's ``printer``.
 
     Writes to ``sys.stdout`` (which pt_serve's tee replaces during a run, so the
     SSE stream still sees every line), records into ``buffer`` for the /logs
-    pane, and — when a tee is active, i.e. the line would not otherwise reach the
-    notebook — echoes to ``echo`` (normally the real stdout).
+    pane, forwards to ``extra_sink`` (the run manager, for the polling
+    transport), and echoes to ``echo`` — but only while ``sys.stdout`` really is
+    pt_serve's tee.
+
+    ``tee_type`` exists because the obvious test — ``sys.stdout is not
+    sys.__stdout__`` — is wrong in a notebook: Jupyter and pytest both swap
+    ``sys.stdout`` for their own object, so that check fires permanently and
+    every line gets echoed twice.
     """
 
     def printer(message: str) -> None:
         text = str(message)
-        captured = sys.stdout is not sys.__stdout__
+        under_tee = tee_type is not None and isinstance(sys.stdout, tee_type)
 
         try:
             print(text)
@@ -671,7 +681,13 @@ def log_printer(
         if buffer is not None:
             buffer.append(text)
 
-        if echo is not None and captured:
+        if extra_sink is not None:
+            try:
+                extra_sink(text)
+            except Exception:
+                pass
+
+        if echo is not None and under_tee:
             try:
                 echo.write(text + "\n")
                 echo.flush()
@@ -723,6 +739,396 @@ def install_log_routes(pt_serve: Any, buffer: LogBuffer) -> Any:
     handler = make_logging_handler(getattr(pt_serve, "_Handler"), buffer)
     pt_serve._Handler = handler
     return handler
+
+
+# ---------------------------------------------------------------------------
+# Front end: polling transport
+# ---------------------------------------------------------------------------
+# The streaming answer rides one long-lived SSE response. A proxy that buffers
+# responses without Transfer-Encoding: chunked (Cloudflare's quick tunnels do)
+# holds every frame until the run ends, so the page shows nothing while the
+# backend is fine. These routes carry the same information over ordinary
+# request/response pairs, which no proxy can strand.
+STAGE_KEYS: Sequence[str] = (
+    "entities",
+    "cpt",
+    "hcpcs",
+    "decision",
+    "validation",
+    "mrf",
+    "answer",
+)
+
+STAGE_TITLES: Sequence[str] = (
+    "Entity extraction",
+    "CPT retrieval",
+    "HCPCS retrieval",
+    "Code decision",
+    "Code validation",
+    "MRF price filter",
+    "Final answer",
+)
+
+# Mirrors pt_serve's parsing so the polling and streaming paths agree.
+# tests/test_colab_run.py asserts this against pt_serve._stages_from_log.
+_STEP_RE = re.compile(r"^STEP\s+(\d)/7\s+[—-]\s+(.*)$")
+_TIME_RE = re.compile(r"^(.*?)\s+(?:completed\s+)?in\s+([\d.]+)s\s*$")
+_MATCH_RE = re.compile(r"^MRF rows matched:\s*(\S+)")
+
+_TIMING_PHRASES = {
+    "categorization": "entities",
+    "cpt retrieval": "cpt",
+    "hcpcs retrieval": "hcpcs",
+    "decision": "decision",
+    "validated": "validation",
+    "mrf filtering": "mrf",
+    "answer generation": "answer",
+}
+
+
+def blank_stages() -> List[Dict[str, Any]]:
+    """The seven stage rows, all pending."""
+    return [
+        {
+            "n": i + 1,
+            "key": STAGE_KEYS[i],
+            "title": STAGE_TITLES[i],
+            "state": "pending",
+            "seconds": None,
+            "detail": None,
+        }
+        for i in range(len(STAGE_KEYS))
+    ]
+
+
+def stage_rows(lines: Sequence[str], done: bool = False) -> List[Dict[str, Any]]:
+    """Derive the seven stage rows from a run's log lines.
+
+    Unlike pt_serve's ``_stages_from_log`` (which finalises everything to "done"),
+    a stage still being worked on stays ``active`` until ``done`` is True — so the
+    UI can show a step in progress rather than ticking it early.
+    """
+    stages = blank_stages()
+    started = False
+
+    for raw in lines:
+        line = str(raw).strip()
+
+        match = _STEP_RE.match(line)
+        if match:
+            index = int(match.group(1)) - 1
+            if 0 <= index < len(stages):
+                stages[index]["state"] = "active"
+                stages[index]["detail"] = match.group(2).strip()
+                started = True
+            continue
+
+        match = _TIME_RE.match(line)
+        if match:
+            phrase = match.group(1).strip().lower()
+            for needle, key in _TIMING_PHRASES.items():
+                if needle in phrase:
+                    index = STAGE_KEYS.index(key)
+                    stages[index]["seconds"] = float(match.group(2))
+                    stages[index]["state"] = "done"
+                    started = True
+                    break
+            continue
+
+        match = _MATCH_RE.match(line)
+        if match:
+            stages[STAGE_KEYS.index("mrf")]["detail"] = f"{match.group(1)} rows matched"
+            started = True
+
+    if done and started:
+        for stage in stages:
+            if stage["state"] in ("active", "pending"):
+                stage["state"] = "done"
+
+    return stages
+
+
+@dataclass
+class RunRecord:
+    """One orchestration run, pollable while it executes."""
+
+    id: str
+    query: str
+    state: str = "running"           # running | done | error
+    result: Any = None               # the front-end payload once finished
+    error: Optional[str] = None
+    seconds: Optional[float] = None
+    lines: List[str] = field(default_factory=list)
+    thread: Optional[threading.Thread] = field(default=None, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def append(self, line: str) -> None:
+        with self._lock:
+            self.lines.append(line)
+
+    def all_lines(self) -> List[str]:
+        with self._lock:
+            return list(self.lines)
+
+    def as_dict(self, since: int = 0) -> Dict[str, Any]:
+        lines = self.all_lines()
+        since = max(0, min(since, len(lines)))
+
+        return {
+            "run": self.id,
+            "query": self.query,
+            "state": self.state,
+            "lines": lines[since:],
+            "next": len(lines),
+            "stages": stage_rows(lines, done=self.state != "running"),
+            "seconds": self.seconds,
+            "error": self.error,
+            "result": self.result if self.state == "done" else None,
+        }
+
+
+class RunManager:
+    """Start runs in the background and let a client poll them.
+
+    Replaces the SSE transport's job without touching it: ``/api/stream`` and
+    ``/api/query`` keep working exactly as before. Runs are serialised, because
+    the pipeline juggles ``sys.stdout`` and one GPU.
+    """
+
+    def __init__(
+        self,
+        orchestration: Callable[..., Any],
+        payload_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+        max_runs: int = 25,
+    ) -> None:
+        self._orchestration = orchestration
+        self._payload_fn = payload_fn
+        self._max_runs = max_runs
+        self._runs: Dict[str, RunRecord] = {}
+        self._lock = threading.Lock()
+        self._run_lock = threading.Lock()
+        self._counter = 0
+        self._active: Optional[RunRecord] = None
+
+    # -- lifecycle ------------------------------------------------------
+    def start(self, query: str) -> RunRecord:
+        with self._lock:
+            self._counter += 1
+            record = RunRecord(id=f"r{self._counter}", query=query)
+            self._runs[record.id] = record
+            self._evict_locked(keep=record.id)
+
+        record.thread = threading.Thread(
+            target=self._execute,
+            args=(record,),
+            name=f"pt-run-{record.id}",
+            daemon=True,
+        )
+        record.thread.start()
+
+        return record
+
+    def _evict_locked(self, keep: str) -> None:
+        while len(self._runs) > self._max_runs:
+            oldest = next(iter(self._runs))
+            if oldest == keep or self._runs[oldest].state == "running":
+                return
+            del self._runs[oldest]
+
+    def get(self, run_id: str) -> Optional[RunRecord]:
+        with self._lock:
+            return self._runs.get(run_id)
+
+    def _execute(self, record: RunRecord) -> None:
+        with self._lock:
+            self._active = record
+
+        start = time.perf_counter()
+
+        try:
+            with self._run_lock:
+                raw = self._orchestration(record.query)
+
+            record.seconds = time.perf_counter() - start
+
+            if self._payload_fn is not None:
+                try:
+                    record.result = self._payload_fn(record, raw)
+                except Exception as error:
+                    # Don't lose a completed run to a projection bug: hand back the
+                    # raw result and say so in the log.
+                    record.append(
+                        f"[payload projection failed: {type(error).__name__}: {error}]"
+                    )
+                    record.result = raw
+            else:
+                record.result = raw
+
+            record.state = "done"
+        except Exception as error:  # surface it to the poller, don't kill the thread
+            record.error = f"{type(error).__name__}: {error}"
+            record.state = "error"
+            record.append(traceback.format_exc())
+        finally:
+            if record.seconds is None:
+                record.seconds = time.perf_counter() - start
+            with self._lock:
+                if self._active is record:
+                    self._active = None
+
+    # -- log capture ----------------------------------------------------
+    def record_line(self, line: str) -> None:
+        """Feed one pipeline log line into the active run, if any."""
+        with self._lock:
+            record = self._active
+
+        if record is not None:
+            record.append(line)
+
+
+def make_extended_handler(
+    base: Any,
+    buffer: Optional[LogBuffer] = None,
+    run_manager: Optional[RunManager] = None,
+) -> Any:
+    """Subclass pt_serve's handler to add /logs, /api/log, /api/run, /api/poll.
+
+    ``pt_serve.serve()`` resolves its module-global ``_Handler`` when it builds
+    the server and dispatches every route through ``self._...``, so subclassing
+    adds routes without editing the vendored file — which stays byte-identical to
+    the front-end repo's copy.
+    """
+    from urllib.parse import parse_qs
+
+    class _ExtendedHandler(base):  # type: ignore[misc, valid-type]
+        def _query_params(self) -> Dict[str, List[str]]:
+            if "?" not in self.path:
+                return {}
+            return parse_qs(self.path.split("?", 1)[1])
+
+        def _read_json(self) -> Dict[str, Any]:
+            # Deliberately narrow: a blanket except here once hid a NameError for
+            # half an hour by turning every POST body into {}.
+            try:
+                length = int(self.headers.get("content-length") or 0)
+            except (TypeError, ValueError):
+                return {}
+
+            raw = self.rfile.read(length) if length > 0 else b""
+
+            if not raw:
+                return {}
+
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                return {}
+
+            return parsed if isinstance(parsed, dict) else {}
+
+        def do_GET(self) -> None:  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            if len(path) > 1:
+                path = path.rstrip("/") or "/"
+
+            if path == "/logs" and buffer is not None:
+                self._send(200, LOGS_PAGE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
+
+            if path == "/api/log" and buffer is not None:
+                raw = (self._query_params().get("since") or ["0"])[0]
+                try:
+                    since = int(raw)
+                except ValueError:
+                    since = 0
+
+                lines, next_index = buffer.snapshot(since)
+                self._json({"lines": lines, "next": next_index})
+                return
+
+            if path == "/api/run" and run_manager is not None:
+                query = (self._query_params().get("q") or [""])[0]
+                self._start_run(query)
+                return
+
+            if path == "/api/poll" and run_manager is not None:
+                self._poll(run_manager)
+                return
+
+            return super().do_GET()
+
+        def do_POST(self) -> None:  # noqa: N802
+            path = self.path.split("?", 1)[0].rstrip("/") or "/"
+
+            if path == "/api/run" and run_manager is not None:
+                self._start_run(str(self._read_json().get("query") or ""))
+                return
+
+            return super().do_POST()
+
+        def _start_run(self, query: str) -> None:
+            if not query.strip():
+                self._json({"error": "empty query"}, 400)
+                return
+
+            record = run_manager.start(query)
+            self._json({"run": record.id, "state": record.state, "query": record.query})
+
+        def _poll(self, manager: RunManager) -> None:
+            params = self._query_params()
+            run_id = (params.get("run") or [""])[0]
+            raw = (params.get("since") or ["0"])[0]
+
+            try:
+                since = int(raw)
+            except ValueError:
+                since = 0
+
+            record = manager.get(run_id)
+            if record is None:
+                self._json({"error": f"unknown run {run_id!r}"}, 404)
+                return
+
+            self._json(record.as_dict(since))
+
+    return _ExtendedHandler
+
+
+def payload_projection(pt_serve: Any) -> Callable[[RunRecord, Any], Dict[str, Any]]:
+    """Wrap ``pt_serve.to_payload`` so a polled run returns the same shape as a streamed one.
+
+    The client consumes one payload contract regardless of transport, so this
+    must produce exactly what ``/api/stream`` would have sent.
+    """
+
+    def project(record: RunRecord, raw: Any) -> Dict[str, Any]:
+        lines = record.all_lines()
+
+        return pt_serve.to_payload(
+            query=record.query,
+            result=raw,
+            run_log="\n".join(lines),
+            stages=stage_rows(lines, done=True),
+            total_seconds=record.seconds,
+        )
+
+    return project
+
+
+def install_routes(
+    pt_serve: Any,
+    buffer: Optional[LogBuffer] = None,
+    run_manager: Optional[RunManager] = None,
+) -> Any:
+    """Point pt_serve at a handler that also serves the log and polling routes."""
+    handler = make_extended_handler(getattr(pt_serve, "_Handler"), buffer, run_manager)
+    pt_serve._Handler = handler
+    return handler
+
+
+# Back-compat alias for the log-only name.
+make_logging_handler = make_extended_handler
+install_log_routes = install_routes
 
 
 # ---------------------------------------------------------------------------
@@ -908,9 +1314,9 @@ def start_tunnel(
     ``provider``: ``cloudflare`` (default, no account needed), ``ngrok``,
     ``none``/``off`` (skip), or ``auto`` (== cloudflare).
     """
-    provider = (provider or "auto").strip().lower()
+    provider = (provider or "").strip().lower()
 
-    if provider in {"none", "off", "no", ""}:
+    if provider in {"", "none", "off", "no"}:
         return None
 
     if provider == "auto":
@@ -1015,6 +1421,7 @@ def serve_ui(
     width: str = "100%",
     logs: bool = True,
     log_to_notebook: bool = True,
+    polling: bool = True,
     verbose: bool = True,
     **setup_kwargs: Any,
 ) -> UIServer:
@@ -1023,6 +1430,12 @@ def serve_ui(
     Wires ``pipeline.run`` in as the orchestration callable — the server tee's
     its stdout and parses the pipeline's own log lines, so the pages track the
     real backend rather than a reimplementation of it.
+
+    ``polling=True`` adds ``/api/run`` + ``/api/poll``, a request/response
+    transport carrying the same information as ``/api/stream``. The built client
+    prefers it, because a proxy that buffers the SSE response (Cloudflare quick
+    tunnels: no ``Transfer-Encoding: chunked``) strands every frame until the run
+    ends, leaving the page blank while the backend works.
 
     ``logs=True`` adds a backend log pane at ``/logs`` (backed by ``/api/log``,
     a plain polling endpoint), and installs a printer that records every pipeline
@@ -1047,16 +1460,21 @@ def serve_ui(
     pt_serve = import_pt_serve()
 
     buffer = LogBuffer() if logs else None
+    run_manager = (
+        RunManager(pipeline.run, payload_projection(pt_serve)) if polling else None
+    )
 
     # The pipeline's printer is the one hook that sees every log line before the
-    # tee does, so it is what both the pane and the notebook read from.
+    # tee does, so it is what the pane, the notebook and the poller all read from.
     pipeline.printer = log_printer(
         buffer,
         sys.__stdout__ if log_to_notebook else None,
+        run_manager.record_line if run_manager is not None else None,
+        getattr(pt_serve, "_Tee", None),
     )
 
-    if buffer is not None:
-        install_log_routes(pt_serve, buffer)
+    if buffer is not None or run_manager is not None:
+        install_routes(pt_serve, buffer, run_manager)
 
     handle = pt_serve.serve(
         orchestration=pipeline.run,

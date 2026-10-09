@@ -223,6 +223,33 @@ ui = colab_run.serve_ui()          # models + data + UI + tunnel
 | `host` | `127.0.0.1` | `0.0.0.0` to also expose on the LAN |
 | `logs` | `True` | Adds a live backend log at `/logs` (JSON polling, not SSE) |
 | `log_to_notebook` | `True` | Echoes every pipeline log line into the cell output |
+| `polling` | `True` | Adds `/api/run` + `/api/poll`, the transport the built client prefers |
+
+### Transports, and why the client polls
+
+The server exposes three ways to run a query. The built page tries them in order:
+
+| Transport | Endpoints | Why |
+| --- | --- | --- |
+| polling (default) | `POST /api/run` → `GET /api/poll?run=…&since=…` | Ordinary request/response pairs. Nothing to strand. |
+| streaming | `GET /api/stream?q=…` | Original SSE path; kept for older servers. |
+| blocking | `POST /api/query` | Last resort for a plain static host. |
+
+The reason for the ordering: `pt_serve._sse_open` sends `connection: close` with
+no `Transfer-Encoding: chunked`, so the SSE response's end is defined by
+connection close — and a proxy is entitled to buffer the whole thing and release
+it at the end. A Cloudflare quick tunnel does exactly that, which is why the page
+used to sit on its static "Reading the published price file…" bubble forever
+while the backend ran fine.
+
+Polling is additive: `install_routes()` subclasses the vendored handler, so
+`ui/pt_serve.py` is still untouched, and `/api/stream` and `/api/query` keep
+working unchanged for anything already pointed at them. The polling endpoint
+projects the run through the same `pt_serve.to_payload`, so the client consumes
+one payload contract regardless of transport.
+
+Verified against the front-end's own suite (259 checks) with both the polling
+server and its mock backend.
 
 ### Watch what the backend is doing
 

@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8.0
+# The config tests exercise .env loading, so the suite needs the loader even
+# though the runtime copes without it.
+python-dotenv>=1.0
