@@ -284,6 +284,62 @@ def test_the_pipeline_runs_without_a_stream():
     assert result["answer"] == "FINAL ANSWER"
 
 
+def test_nothing_to_price_means_no_price_answer_and_no_step_seven():
+    """An empty extraction must not be answered with the whole price file.
+
+    This is the reported run: the categorizer returned all four lists empty for
+    "How much woudl an X-ray cost?", so no code survived and no payer or hospital
+    was named. sql_answer() narrows nothing in that state, so it matches every row
+    of the MRF — which the answer step would then present as the cost of an X-ray.
+    """
+    pipeline, _, engine = make_pipeline(
+        {"use_codes": "none", "cpt_list": [], "hcpcs_list": []},
+        categorization={
+            "medical": [],
+            "hospital": [],
+            "insurer": [],
+            "medication": [],
+        },
+    )
+
+    result = pipeline.run("How much woudl an X-ray cost?", verbose=False)
+
+    assert result["stopped"] == "nothing_to_filter"
+    assert result["code_plausible"]["match_count"] == 0
+    assert len(result["code_plausible"]["price_summary"]) == 0
+    assert "could not identify" in result["answer"].lower()
+
+    # Step 7 never ran, so no answer is built on unrelated prices.
+    assert engine.answer_args is None
+
+
+def test_a_payer_filter_alone_still_prices():
+    """The guard must not fire when a payer or hospital still constrains the query.
+
+    No code survives here either, but "UPMC Presbyterian" is a real filter, so the
+    fallback that returns that facility's rows is correct and must be preserved.
+    """
+    pipeline, _, _ = make_pipeline(
+        {"use_codes": "none", "cpt_list": [], "hcpcs_list": []}
+    )
+
+    result = pipeline.run("query", verbose=False)
+
+    assert "stopped" not in result
+    assert result["code_plausible"]["match_count"] == 1
+
+
+def test_a_normal_run_is_unaffected_by_the_guard():
+    pipeline, _, _ = make_pipeline(
+        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
+    )
+
+    result = pipeline.run("diagnostic mammogram", verbose=False)
+
+    assert "stopped" not in result
+    assert result["code_plausible"]["match_count"] == 1
+
+
 def test_top_k_is_forwarded_to_the_retriever():
     pipeline, retriever, _ = make_pipeline(
         {"use_codes": "cpt", "cpt_list": [], "hcpcs_list": []},

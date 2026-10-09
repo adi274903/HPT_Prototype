@@ -318,17 +318,8 @@ class HealthcarePricingPipeline:
         emit(ev.STAGE_FINISHED, stage="validation")
 
         # ---------------------------------------------------------
-        # 6. Filter UPMC MRF
+        # Correct the model's entity names, before they become filters.
         # ---------------------------------------------------------
-        log("\n" + "=" * 80)
-        log("STEP 6/7 — Filtering UPMC MRF data by selected codes, payer, and hospital")
-
-        emit(ev.STAGE_STARTED, stage="mrf", detail="Filtering the price file")
-
-        t0 = time.perf_counter()
-
-        # Two corrections to the model's entity names, before they become filters.
-        #
         # 1. A bare category word ("hospital", "my insurance") is not a name. As a
         #    substring match it can quietly select an arbitrary slice of the file,
         #    so drop it rather than let it constrain the query.
@@ -352,6 +343,81 @@ class HealthcarePricingPipeline:
 
         if insurers != raw_insurers:
             log(f"Insurers resolved to price-file entries: {raw_insurers} -> {insurers}")
+
+        # ---------------------------------------------------------
+        # Guard: with nothing to narrow by, the filter prices the entire file.
+        # ---------------------------------------------------------
+        # sql_answer() starts from "every row" and only narrows. With no codes, no
+        # payer and no hospital it narrows nothing and returns the whole MRF, which
+        # the answer step would then present as the cost of whatever was asked. This
+        # is reachable in practice: when extraction finds no procedure, step 2 runs
+        # on an empty query and the decision has nothing to select.
+        #
+        # A payer or hospital filter alone is enough to answer usefully, so this
+        # fires only when there is genuinely nothing left to price against.
+        if (
+            not output["cpt_list"]
+            and not output["hcpcs_list"]
+            and not hospitals
+            and not insurers
+        ):
+            total_time = time.perf_counter() - pipeline_start
+
+            log("\n" + "=" * 80)
+            log("NO PRICE ANSWER — nothing in this question could be priced.")
+            log("No billing code, payer or hospital was identified, so filtering the")
+            log("MRF would match the entire published file. The run stops here")
+            log("rather than presenting unrelated prices as an answer.")
+            log("=" * 80)
+
+            emit(
+                ev.STAGE_CONTENT,
+                stage="mrf",
+                content={"stopped": "nothing_to_filter", "match_count": 0},
+            )
+            emit(ev.STAGE_FINISHED, stage="mrf")
+
+            answer = (
+                "I could not identify a medical service or procedure in that "
+                "question, so there is nothing to price.\n\n"
+                "Try naming the test or service directly — for example \"How much "
+                "does a diagnostic mammogram cost?\" — and the hospital and "
+                "insurance plan if you know them."
+            )
+
+            log("\nFINAL ANSWER:")
+            log(answer)
+
+            return {
+                "categorized": categorized,
+                "cpt_candidates": cpt_candidates,
+                "hcpcs_candidates": hcpcs_candidates,
+                "output": output,
+                "code_plausible": {
+                    "matches": self.mrf_data.iloc[0:0].copy(),
+                    "price_summary": self.mrf_data.iloc[0:0].copy(),
+                    "match_count": 0,
+                    "filters_used": {
+                        "cpt_codes": [],
+                        "hcpcs_codes": [],
+                        "insurers": insurers,
+                        "hospitals": hospitals,
+                    },
+                },
+                "answer": answer,
+                "total_seconds": total_time,
+                "stopped": "nothing_to_filter",
+            }
+
+        # ---------------------------------------------------------
+        # 6. Filter UPMC MRF
+        # ---------------------------------------------------------
+        log("\n" + "=" * 80)
+        log("STEP 6/7 — Filtering UPMC MRF data by selected codes, payer, and hospital")
+
+        emit(ev.STAGE_STARTED, stage="mrf", detail="Filtering the price file")
+
+        t0 = time.perf_counter()
 
         code_plausible = sql_answer(
             cpt_list=output["cpt_list"],
