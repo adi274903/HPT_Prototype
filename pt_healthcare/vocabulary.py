@@ -12,12 +12,19 @@ filter is a case-insensitive *substring* match, so a value the model invented
 matches no rows at all — or, worse, matches an arbitrary slice of the file and
 presents the wrong payer's or facility's prices as the user's.
 
-Two guards live here, matching two failure modes:
+Two guards live here, both deterministic — they run *after* the model, not instead
+of it:
 
-* :func:`column_vocabulary` / :func:`vocabulary_block` — tell the model what exists.
+* :func:`column_vocabulary` — read the real hospital and payer names out of the MRF.
 * :func:`drop_placeholders` — refuse bare category words even when the model emits
-  them anyway. The prompt used to *ask* for these ("include generic references
-  such as 'my hospital'"), which is how ``{"hospital": ["hospital"]}`` happened.
+  them anyway. The categorizer prompt used to *ask* for these ("include generic
+  references such as 'my hospital'"), which is how ``{"hospital": ["hospital"]}``
+  happened.
+* :func:`resolve_to_vocabulary` — snap a near miss onto the real entry.
+
+The names are deliberately no longer listed in the prompt. Carrying them inline
+cost about 280 tokens and, worse, made the model fill the two categories that had
+a list while returning ``medical: []`` for a query that plainly named a procedure.
 """
 
 from __future__ import annotations
@@ -219,46 +226,3 @@ def resolve_to_vocabulary(
             resolved.append(term)
 
     return list(dict.fromkeys(resolved))
-
-
-def vocabulary_block(
-    hospitals: Optional[Sequence[str]] = None,
-    insurers: Optional[Sequence[str]] = None,
-) -> str:
-    """Prompt text listing the known hospitals and payers, or ``""`` if unknown.
-
-    Left empty when both lists are empty, so a pipeline built without an MRF gets
-    exactly the original prompt.
-    """
-    hospitals = list(hospitals or [])
-    insurers = list(insurers or [])
-
-    if not hospitals and not insurers:
-        return ""
-
-    lines = [
-        "",
-        "    Reference — the only hospital and payer names that exist in the published",
-        "    price file. When the query refers to one of these, return the exact string",
-        "    from the list below, matching loosely: a misspelling, an abbreviation or a",
-        "    partial name still refers to an entry. Never return the list itself — only",
-        "    what the query actually refers to.",
-        "",
-        "    This reference covers the hospital and insurer categories ONLY. It does not",
-        "    restrict the medical or medication categories: a procedure, condition, test",
-        "    or drug named in the query always belongs in medical or medication, whether",
-        "    or not any list below mentions it.",
-        "",
-    ]
-
-    if hospitals:
-        lines.append(f"    hospitals ({len(hospitals)}):")
-        lines.extend(f"    - {name}" for name in hospitals)
-
-    if insurers:
-        lines.append(f"    insurers ({len(insurers)}):")
-        lines.extend(f"    - {name}" for name in insurers)
-
-    lines.append("")
-
-    return "\n".join(lines)

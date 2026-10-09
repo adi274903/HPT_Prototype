@@ -6,7 +6,6 @@ from pt_healthcare.vocabulary import (
     column_vocabulary,
     drop_placeholders,
     resolve_to_vocabulary,
-    vocabulary_block,
 )
 
 PAYERS = ["Aetna", "Highmark BCBS of PA", "Multiplan", "UPMC Health Plan"]
@@ -113,25 +112,14 @@ def test_resolve_dedupes_after_snapping():
     ]
 
 
-def test_vocabulary_block_is_empty_without_known_values():
-    """No MRF loaded means the prompt stays exactly the prototype's."""
-    assert vocabulary_block() == ""
-    assert vocabulary_block([], []) == ""
+def test_vocabulary_block_is_gone():
+    """The prompt no longer carries the hospital and payer list.
 
+    Keeping it out is the point: it was ~280 tokens, the deterministic resolver
+    already maps near misses onto real entries, and the two-listed/two-unlisted
+    split is what made the model return an empty medical category.
+    """
+    from pt_healthcare import vocabulary
 
-def test_vocabulary_block_lists_both_sides():
-    block = vocabulary_block(["Upmc Altoona"], ["Aetna"])
-
-    assert "hospitals (1):" in block
-    assert "- Upmc Altoona" in block
-    assert "insurers (1):" in block
-    assert "- Aetna" in block
-    # The instruction that stops the model dumping the whole list back.
-    assert "Never return the list itself" in block
-
-
-def test_vocabulary_block_omits_an_empty_side():
-    block = vocabulary_block([], ["Aetna"])
-
-    assert "insurers (1):" in block
-    assert "hospitals" not in block
+    assert not hasattr(vocabulary, "vocabulary_block")
+    assert hasattr(vocabulary, "resolve_to_vocabulary")

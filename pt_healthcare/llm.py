@@ -27,27 +27,20 @@ class MedGemmaEngine:
     # ------------------------------------------------------------------
     # 1. Entity extraction  (notebook cell 15)
     # ------------------------------------------------------------------
-    def categorize(
-        self,
-        user_query: str,
-        hospitals: Optional[Sequence[str]] = None,
-        insurers: Optional[Sequence[str]] = None,
-    ) -> str:
+    def categorize(self, user_query: str) -> str:
         """Run the categorizer prompt and return the raw assistant text.
 
-        ``hospitals`` / ``insurers`` are the known values from the published price
-        file; passing them makes extraction a choice from a closed set instead of
-        free invention.
+        No vocabulary is injected. The known hospital and payer names used to be
+        listed inline — about 280 tokens — which made the model fill the two
+        categories that had a list and return ``medical: []`` for a query that
+        plainly named a procedure. ``vocabulary.resolve_to_vocabulary()`` does that
+        mapping after the fact instead, so the prompt does not have to carry it.
 
-        ``max_new_tokens`` is passed explicitly. The pipe's own default is 256,
-        and MedGemma is a thinking model: it emits ``<unused94>thought …`` before
-        the JSON, so a verbosely-reasoned query can spend the entire budget on the
-        thought block and get cut off before any JSON exists — surfacing later as
-        "Could not find a JSON object in the model response". The prototype hit
-        this too: its log shows ``max_new_tokens (=256)`` for this call and
-        ``(=4096)`` for the other two.
+        ``max_new_tokens`` is passed explicitly. MedGemma is a thinking model, and
+        the pipe's own default of 256 went entirely on the <unused94>thought block
+        before any JSON existed.
         """
-        prompt = build_categorizer_prompt(user_query, hospitals, insurers)
+        prompt = build_categorizer_prompt(user_query)
 
         messages = [
             {

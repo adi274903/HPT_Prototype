@@ -14,36 +14,31 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from . import config
 from .parsing import compact_candidates
-from .vocabulary import vocabulary_block
 
 
-def build_categorizer_prompt(
-    user_query: str,
-    hospitals: Optional[Sequence[str]] = None,
-    insurers: Optional[Sequence[str]] = None,
-) -> str:
+def build_categorizer_prompt(user_query: str) -> str:
     """Entity-extraction prompt: query -> JSON with medical/hospital/insurer/medication.
 
-    ``hospitals`` / ``insurers`` are the known values from the published price
-    file. Supplying them replaces open-ended NER with slot-filling, which is what
-    the downstream substring filters need — and it stops the model substituting a
-    placeholder like "hospital" for a facility it cannot name. Omit them and the
-    prompt is exactly the prototype's.
+    Kept deliberately short. An earlier version carried the whole hospital and payer
+    vocabulary inline — about 280 tokens of names — so that extraction became
+    slot-filling rather than open-ended. That list was both redundant and harmful:
+    redundant because ``vocabulary.resolve_to_vocabulary()`` already snaps a near
+    miss onto the real entry ("UPMC Presby" -> "Upmc Presbyterian Shadyside",
+    "Higmark BCBS plan" -> "Highmark BCBS of PA"), and harmful because with two
+    categories holding an enumerated list and two not, the model filled the listed
+    ones and returned ``medical: []`` for a query that plainly named a procedure.
     """
-    known = vocabulary_block(list(hospitals or []), list(insurers or []))
+    return f"""You are a healthcare-query entity extractor.
 
-    return f"""You are a healthcare-query entity classifier and NER extractor.
+    Extract entities from the user's query into four categories:
 
-    Analyze the user's query and extract entities into these categories:
+    - medical: the procedure, test, condition, symptom, treatment or service named
+      in the query. This is the one that matters — if the query names a service, it
+      belongs here.
+    - hospital: a named facility, clinic, health system or provider.
+    - insurer: a named health plan, payer or insurance company.
+    - medication: a specific drug named in the query.
 
-    - medical: Medical conditions, symptoms, procedures, medications, specialties,
-      tests, treatments, anatomy, diagnoses, CPT/HCPCS/ICD-related concepts,
-      or healthcare services.
-    - hospital: Hospitals, clinics, health systems, urgent-care centers, physician
-      groups, laboratories, imaging centers, pharmacies, or other providers/facilities.
-    - insurer: Health insurance companies, payers, Medicare, Medicaid, insurance
-      plans, PBMs, prior-authorization organizations, or claims administrators.
-{known}
     Return ONLY valid JSON. Do not explain. Do not add Markdown fences.
 
     Use exactly this schema:
@@ -55,94 +50,28 @@ def build_categorizer_prompt(
     }}
 
     Rules:
-    - Extract exact relevant text spans from the query when possible.
-    - An entity may belong to multiple categories only if it truly fits each one.
-    - Use an empty list when no entity exists in a category.
-    - Do not infer entities that were not stated.
-    - Normalize obvious capitalization while preserving proper names.
-    - Only extract a hospital or an insurer that the query actually names or
-      otherwise identifies. A bare category word is not an entity: "what hospital
-      should I go to" and "does my insurance cover this" name neither, so those
-      lists stay empty.
-    - Never emit a generic word such as "hospital", "clinic", "doctor",
-      "provider", "insurance", "my hospital", "my insurance" or "my plan" as an
-      entity. Those never match a real entry in the price file.
+    - Copy the query's own wording for each entity.
+    - Use an empty list when a category has nothing in it.
+    - Never emit a bare category word: "hospital", "clinic", "doctor", "provider",
+      "insurance" or "my plan" are not entities. A query asking which hospital to
+      use names no facility.
+    - A service named by a short or clipped phrase still counts. "Cost of
+      colonoscopy at UPMC Presby?" names a colonoscopy; "How much would an X-ray
+      cost?" names an X-ray.
 
     Examples:
 
     Query: Does Blue Cross cover an MRI at Houston Methodist?
-    Output:
-    {{
-      "medical": ["MRI"],
-      "hospital": ["Houston Methodist"],
-      "insurer": ["Blue Cross"],
-      "medication" : []
-    }}
-
-    Query: What is the recovery time after knee replacement surgery?
-    Output:
-    {{
-      "medical": ["knee replacement surgery"],
-      "hospital": [],
-      "insurer": [],
-      "medication" : []
-    }}
-
-    Query: Does Cigna cover a CT Scan? And would I need Tylenol?
-    Output:
-    {{
-      "medical": ["CT Scan"],
-      "hospital": [],
-      "insurer": ["Cigna"],
-      "medication" : ["Tylenol"]
-    }}
-
-
-    Query: Which hospital should I go to for a colonoscopy?
-    Output:
-    {{
-      "medical": ["colonoscopy"],
-      "hospital": [],
-      "insurer": [],
-      "medication" : []
-    }}
-
-    "hospital" is empty because the query names no facility. Asking *which*
-    hospital you should use is not naming one.
-
-    Query: What might a diagnostic mammogram cost at UPMC Presbyterian with UPMC Health Plan?
-    Output:
-    {{
-      "medical": ["diagnostic mammogram"],
-      "hospital": ["UPMC Presbyterian"],
-      "insurer": ["UPMC Health Plan"],
-      "medication" : []
-    }}
-
-    Every category is filled from the query text. Only the hospital and insurer
-    values additionally get matched against the reference lists.
+    Output: {{"medical": ["MRI"], "hospital": ["Houston Methodist"], "insurer": ["Blue Cross"], "medication": []}}
 
     Query: Cost of colonoscopy at UPMC Presby?
-    Output:
-    {{
-      "medical": ["colonoscopy"],
-      "hospital": ["UPMC Presby"],
-      "insurer": [],
-      "medication" : []
-    }}
+    Output: {{"medical": ["colonoscopy"], "hospital": ["UPMC Presby"], "insurer": [], "medication": []}}
 
     Query: How much would an X-ray cost?
-    Output:
-    {{
-      "medical": ["X-ray"],
-      "hospital": [],
-      "insurer": [],
-      "medication" : []
-    }}
+    Output: {{"medical": ["X-ray"], "hospital": [], "insurer": [], "medication": []}}
 
-    Those last two are terse and noun-only. They still name a service, so the
-    service still belongs in medical — a short or clipped phrasing is not a reason
-    to leave the category empty.
+    Query: Which hospital should I go to for a colonoscopy?
+    Output: {{"medical": ["colonoscopy"], "hospital": [], "insurer": [], "medication": []}}
 
     Now classify this query:
 
