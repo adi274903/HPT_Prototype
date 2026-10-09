@@ -114,6 +114,19 @@ def test_every_model_call_is_deterministic():
     )
 
 
+def test_intent_prompt_offers_every_tool():
+    """It used to offer only price and lookup, so 'explain' was unreachable."""
+    from pt_healthcare.prompts import build_intent_prompt
+
+    prompt = build_intent_prompt("what is a colonoscopy?")
+
+    for tool in ("price", "lookup", "explain"):
+        assert tool in prompt
+
+    assert "exactly one word" in prompt
+    assert "what is a colonoscopy?" in prompt
+
+
 def test_general_prompt_says_no_lookup_happened():
     """The model must not imply it searched when it did not."""
     prompt = build_general_prompt("what is a colonoscopy?")
