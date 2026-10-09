@@ -221,6 +221,29 @@ ui = colab_run.serve_ui()          # models + data + UI + tunnel
 | `page` | `patient` | Which page the in-notebook iframe opens; both are always served |
 | `port` | `8000` | Falls back through 8001 / 8080 / 8888 / a free port |
 | `host` | `127.0.0.1` | `0.0.0.0` to also expose on the LAN |
+| `logs` | `True` | Adds a live backend log at `/logs` (JSON polling, not SSE) |
+| `log_to_notebook` | `True` | Echoes every pipeline log line into the cell output |
+
+### Watch what the backend is doing
+
+`/logs` on the same URL is a live backend log — the STEP lines, timings, matched
+row counts and rejections, straight from the pipeline.
+
+```python
+ui = colab_run.serve_ui()
+print(ui.pages)                     # ...plus: Logs: <url>/logs
+```
+
+It matters because the patient page's progress is **cosmetic until real frames
+arrive**: the bubble always says "Reading the published price file…", and the
+seven step circles only tick when a `stage` frame lands. A proxy that buffers SSE
+(Cloudflare quick tunnels do) leaves that bubble static forever while the backend
+runs fine. `/logs` polls over ordinary HTTP, so it keeps working — and
+`log_to_notebook=True` echoes the same lines into the notebook cell so you can
+watch a run without opening a browser at all.
+
+Both are added by subclassing the vendored server's handler — `ui/pt_serve.py`
+itself is untouched.
 
 From the CLI:
 

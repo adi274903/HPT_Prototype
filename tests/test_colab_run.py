@@ -5,6 +5,11 @@ composition. Starting a real server or a real tunnel is out of scope — those
 need the models and the network.
 """
 
+import io
+import json
+import sys
+import urllib.request
+
 import pytest
 
 import colab_run
@@ -226,3 +231,119 @@ def test_ensure_dependencies_asks_for_a_restart_if_still_missing(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Restart session"):
         colab_run.ensure_dependencies(auto_install=True)
+
+
+# ---------------------------------------------------------------------------
+# Backend log pane
+# ---------------------------------------------------------------------------
+def test_log_buffer_indexes_absolutely_across_eviction():
+    buffer = colab_run.LogBuffer(maxlen=3)
+
+    for i in range(5):
+        buffer.append(f"line {i}")
+
+    lines, nxt = buffer.snapshot(0)
+    assert lines == ["line 2", "line 3", "line 4"]
+    assert nxt == 5
+
+    lines, nxt = buffer.snapshot(4)
+    assert lines == ["line 4"]
+    assert nxt == 5
+
+    lines, nxt = buffer.snapshot(5)
+    assert lines == []
+    assert nxt == 5
+
+    assert len(buffer) == 3
+
+
+def test_log_printer_buffers_always_and_only_echoes_under_a_tee(monkeypatch):
+    buffer = colab_run.LogBuffer()
+    echo = io.StringIO()
+    printer = colab_run.log_printer(buffer, echo)
+
+    # No tee: sys.stdout is the real stdout, so print() already reached the
+    # notebook and echoing would duplicate it.
+    printer("one")
+    assert buffer.snapshot(0)[0] == ["one"]
+    assert echo.getvalue() == ""
+
+    class FakeTee:
+        def write(self, _s):
+            return len(_s)
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(sys, "stdout", FakeTee())
+    printer("two")
+
+    assert echo.getvalue() == "two\n"
+    assert buffer.snapshot(0)[0] == ["one", "two"]
+
+
+def test_logging_handler_subclasses_the_vendored_one():
+    pt_serve = import_pt_serve()
+
+    handler = colab_run.make_logging_handler(pt_serve._Handler, colab_run.LogBuffer())
+
+    assert issubclass(handler, pt_serve._Handler)
+    assert handler is not pt_serve._Handler
+
+
+def test_install_log_routes_swaps_the_handler_pt_serve_uses():
+    pt_serve = import_pt_serve()
+    before = pt_serve._Handler
+
+    try:
+        handler = colab_run.install_log_routes(pt_serve, colab_run.LogBuffer())
+        assert pt_serve._Handler is handler
+    finally:
+        pt_serve._Handler = before
+
+
+class _FakePipeline:
+    """Just enough pipeline for the server: run(), printer, mrf_data, retriever."""
+
+    def __init__(self):
+        self.printer = print
+        self.mrf_data = None
+        self.top_k = 10
+        self.retriever = type("R", (), {"client": None})()
+
+    def run(self, query, verbose=True):
+        self.printer("STEP 1/7 - test")
+        self.printer("Categorization completed in 0.01s")
+        return {}
+
+
+def test_serve_ui_exposes_the_log_pane_and_the_log_endpoint():
+    fake = _FakePipeline()
+
+    ui = colab_run.serve_ui(
+        pipeline=fake,
+        tunnel="none",
+        display=False,
+        verbose=False,
+    )
+
+    try:
+        base = ui.local_url.rstrip("/")
+
+        with urllib.request.urlopen(base + "/logs", timeout=5) as response:
+            assert response.status == 200
+            body = response.read().decode("utf-8")
+
+        assert "Backend log" in body
+        assert "/api/log" in body
+
+        with urllib.request.urlopen(base + "/api/log?since=0", timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert payload["lines"] == [] and payload["next"] == 0
+
+        # serve_ui replaced the pipeline's default printer with the buffering one
+        # that feeds this endpoint.
+        assert fake.printer is not print
+    finally:
+        ui.stop()

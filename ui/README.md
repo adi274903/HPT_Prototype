@@ -65,6 +65,34 @@ ui.stop()
 
 `/` is the patient chat, `/pipeline` the dashboard; each links to the other.
 
+### Backend log pane (`/logs`)
+
+`serve_ui(logs=True)` — the default — adds a third route: a live backend log at
+`/logs`, backed by `/api/log?since=N`, a plain JSON polling endpoint.
+
+It exists because the patient page's progress display is *cosmetic* until real
+frames arrive: `botBody()` always renders the literal string "Reading the
+published price file…", and the seven step circles only tick when a `stage`
+frame lands. Behind a proxy that buffers SSE (Cloudflare's quick tunnels do,
+since `_sse_open` sends `connection: close` with no `Transfer-Encoding:
+chunked`), the page sits on that static bubble indefinitely while the backend is
+working fine. `/logs` polls over ordinary HTTP, so it shows what is actually
+running regardless.
+
+The same lines are echoed into the notebook cell output by default
+(`log_to_notebook=True`), which is the quickest way to watch a run.
+
+This is added **without modifying `pt_serve.py`**: `pt_serve.serve()` resolves its
+module-global `_Handler` at call time, so `colab_run.install_log_routes()`
+subclasses it and swaps it in. The vendored file stays byte-identical (see
+`sha256sum ui/pt_serve.py`). The log lines come from the pipeline's own
+`printer` hook, which sees every line before pt_serve's stdout tee does.
+
+```python
+ui = colab_run.serve_ui(logs=True, log_to_notebook=True)   # defaults
+ui = colab_run.serve_ui(logs=False)                        # no /logs, no notebook echo
+```
+
 ## Not present here
 
 - `dist/pt_colab.py`, the single-file bundle that embedded both pages, was

@@ -61,6 +61,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -537,6 +538,194 @@ def check_ui_assets() -> Dict[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# Front end: a backend log pane
+# ---------------------------------------------------------------------------
+#: Page served at /logs. Self-contained, polls /api/log, so it works even when
+#: the SSE stream is being buffered by a proxy (Cloudflare's, typically).
+LOGS_PAGE_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backend log</title><style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin:0; background:#0e1113; color:#dfe4e6;
+       font:13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+header { position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:10px;
+         padding:9px 14px; background:#15191c; border-bottom:1px solid #262c30; }
+h1 { font-size:13px; font-weight:600; margin:0; letter-spacing:.02em; }
+.meta { margin-left:auto; display:flex; gap:14px; color:#8a9499; }
+.dot { width:8px; height:8px; border-radius:50%; background:#3fb950; flex:none; }
+.dot.off { background:#d29922; }
+#log { margin:0; padding:14px; white-space:pre-wrap; word-break:break-word; }
+#log div { padding:1px 0; }
+.err { color:#f85149; }
+.step { color:#58a6ff; }
+label { user-select:none; cursor:pointer; }
+@media (prefers-color-scheme: light) {
+  body { background:#fff; color:#1c2024; }
+  header { background:#f6f8fa; border-color:#d8dee4; }
+  .meta { color:#59636e; } .step { color:#0550ae; }
+}
+</style></head><body>
+<header>
+  <span class="dot" id="dot"></span><h1>Backend log</h1><span id="state">connecting…</span>
+  <span class="meta"><label><input type="checkbox" id="pin" checked> follow</label>
+  <span id="count">0 lines</span></span>
+</header>
+<pre id="log"></pre><script>
+(function () {
+  var since = 0, total = 0, log = document.getElementById('log'),
+      dot = document.getElementById('dot'), state = document.getElementById('state'),
+      count = document.getElementById('count'), pin = document.getElementById('pin');
+
+  function render(lines) {
+    var frag = document.createDocumentFragment();
+    lines.forEach(function (line) {
+      var d = document.createElement('div');
+      d.textContent = line === '' ? ' ' : line;
+      if (/traceback|error/i.test(line)) d.className = 'err';
+      else if (/^STEP/.test(line)) d.className = 'step';
+      frag.appendChild(d);
+    });
+    log.appendChild(frag);
+    total += lines.length;
+    count.textContent = total + ' lines';
+    while (log.childNodes.length > 5000) log.removeChild(log.firstChild);
+    if (pin.checked) window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  function tick() {
+    fetch('/api/log?since=' + since, { headers: { accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (d) {
+        dot.className = 'dot'; state.textContent = 'live';
+        since = d.next;
+        if (d.lines && d.lines.length) render(d.lines);
+      })
+      .catch(function (e) {
+        dot.className = 'dot off';
+        state.textContent = 'reconnecting… ' + (e && e.message ? e.message : '');
+      })
+      .then(function () { setTimeout(tick, 1000); });
+  }
+
+  tick();
+})();
+</script></body></html>
+"""
+
+
+class LogBuffer:
+    """Thread-safe ring buffer of backend log lines, with absolute indexing."""
+
+    def __init__(self, maxlen: int = 5000) -> None:
+        self._lines: List[str] = []
+        self._start = 0          # absolute index of _lines[0]
+        self._maxlen = maxlen
+        self._lock = threading.Lock()
+
+    def append(self, line: str) -> None:
+        with self._lock:
+            self._lines.append(line)
+            if len(self._lines) > self._maxlen:
+                drop = len(self._lines) - self._maxlen
+                del self._lines[:drop]
+                self._start += drop
+
+    def snapshot(self, since: int = 0) -> Tuple[List[str], int]:
+        """Lines after absolute index ``since``, plus the new absolute index."""
+        with self._lock:
+            start, end = self._start, self._start + len(self._lines)
+
+            if since <= start:
+                return list(self._lines), end
+
+            return list(self._lines[since - start :]), end
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._lines)
+
+
+def log_printer(
+    buffer: Optional[LogBuffer] = None,
+    echo: Optional[Any] = None,
+) -> Callable[[str], None]:
+    """Build the pipeline's ``printer``.
+
+    Writes to ``sys.stdout`` (which pt_serve's tee replaces during a run, so the
+    SSE stream still sees every line), records into ``buffer`` for the /logs
+    pane, and — when a tee is active, i.e. the line would not otherwise reach the
+    notebook — echoes to ``echo`` (normally the real stdout).
+    """
+
+    def printer(message: str) -> None:
+        text = str(message)
+        captured = sys.stdout is not sys.__stdout__
+
+        try:
+            print(text)
+        except Exception:
+            pass
+
+        if buffer is not None:
+            buffer.append(text)
+
+        if echo is not None and captured:
+            try:
+                echo.write(text + "\n")
+                echo.flush()
+            except Exception:
+                pass
+
+    return printer
+
+
+def make_logging_handler(base: Any, buffer: LogBuffer) -> Any:
+    """Subclass pt_serve's handler to add /logs and /api/log.
+
+    ``pt_serve.serve()`` looks up its module-global ``_Handler`` when it builds
+    the server, so swapping it here adds routes without editing the vendored file
+    (which stays byte-identical to the front-end repo's copy).
+    """
+    from urllib.parse import parse_qs
+
+    class _LoggingHandler(base):  # type: ignore[misc, valid-type]
+        def do_GET(self) -> None:  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            if len(path) > 1:
+                path = path.rstrip("/") or "/"
+
+            if path == "/logs":
+                self._send(200, LOGS_PAGE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
+
+            if path == "/api/log":
+                since = 0
+                if "?" in self.path:
+                    raw = (parse_qs(self.path.split("?", 1)[1]).get("since") or ["0"])[0]
+                    try:
+                        since = int(raw)
+                    except ValueError:
+                        since = 0
+
+                lines, next_index = buffer.snapshot(since)
+                self._json({"lines": lines, "next": next_index})
+                return
+
+            return super().do_GET()
+
+    return _LoggingHandler
+
+
+def install_log_routes(pt_serve: Any, buffer: LogBuffer) -> Any:
+    """Point pt_serve at a handler that also serves /logs and /api/log."""
+    handler = make_logging_handler(getattr(pt_serve, "_Handler"), buffer)
+    pt_serve._Handler = handler
+    return handler
+
+
+# ---------------------------------------------------------------------------
 # Front end: public tunnels
 # ---------------------------------------------------------------------------
 # cloudflared prints its quick-tunnel URL to its own log.
@@ -824,6 +1013,8 @@ def serve_ui(
     display: Optional[bool] = None,
     height: int = 1180,
     width: str = "100%",
+    logs: bool = True,
+    log_to_notebook: bool = True,
     verbose: bool = True,
     **setup_kwargs: Any,
 ) -> UIServer:
@@ -832,6 +1023,12 @@ def serve_ui(
     Wires ``pipeline.run`` in as the orchestration callable — the server tee's
     its stdout and parses the pipeline's own log lines, so the pages track the
     real backend rather than a reimplementation of it.
+
+    ``logs=True`` adds a backend log pane at ``/logs`` (backed by ``/api/log``,
+    a plain polling endpoint), and installs a printer that records every pipeline
+    line into it. ``log_to_notebook=True`` also echoes those lines into the cell
+    output, so you can watch a run without the browser — pt_serve otherwise only
+    mirrors them to the page.
 
     Returns a `UIServer`; call ``.stop()`` to end the server and the tunnel.
     """
@@ -848,6 +1045,18 @@ def serve_ui(
         )
 
     pt_serve = import_pt_serve()
+
+    buffer = LogBuffer() if logs else None
+
+    # The pipeline's printer is the one hook that sees every log line before the
+    # tee does, so it is what both the pane and the notebook read from.
+    pipeline.printer = log_printer(
+        buffer,
+        sys.__stdout__ if log_to_notebook else None,
+    )
+
+    if buffer is not None:
+        install_log_routes(pt_serve, buffer)
 
     handle = pt_serve.serve(
         orchestration=pipeline.run,
@@ -878,6 +1087,13 @@ def serve_ui(
             f"Pages      : patient={ui.pages['patient']}  "
             f"dashboard={ui.pages['dashboard']}"
         )
+        if buffer is not None:
+            base = ui.url.rstrip("/")
+            print(f"Logs       : {base}/logs")
+            print(
+                "             ^ live backend log over plain polling, so it still works\n"
+                "               when a proxy buffers the SSE answer stream."
+            )
 
     if display is None:
         display = in_colab()
