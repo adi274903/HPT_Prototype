@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 
 import pandas as pd
 
-from .config import TOP_K
+from . import config
 from .pricing import sql_answer
 from .utils import clean_list
 
@@ -41,14 +41,14 @@ class HealthcarePricingPipeline:
         retriever: Any,
         engine: Any,
         mrf_data: pd.DataFrame,
-        top_k: int = TOP_K,
+        top_k: Optional[int] = None,
         printer: Callable[[str], None] = print,
         display_fn: Optional[DisplayHook] = None,
     ) -> None:
         self.retriever = retriever
         self.engine = engine
         self.mrf_data = mrf_data
-        self.top_k = top_k
+        self.top_k = config.top_k() if top_k is None else top_k
         self.printer = printer
         self.display_fn = display_fn or _default_display
 
@@ -325,7 +325,7 @@ def orchestration(user_query: str, verbose: bool = True, **kwargs: Any) -> Dict[
     retriever = kwargs.pop("retriever")
     engine = kwargs.pop("engine")
     mrf_data = kwargs.pop("mrf_data")
-    top_k = kwargs.pop("top_k", TOP_K)
+    top_k = kwargs.pop("top_k", None)
 
     pipeline = HealthcarePricingPipeline(
         retriever=retriever,

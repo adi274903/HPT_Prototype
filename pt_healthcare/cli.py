@@ -39,9 +39,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start a REPL and answer questions until you type 'exit'.",
     )
 
-    parser.add_argument("--mrf-csv", default=config.MRF_CSV_PATH, help="Path to the cleaned MRF CSV.")
-    parser.add_argument("--qdrant-path", default=config.QDRANT_PATH, help="Local Qdrant store directory.")
-    parser.add_argument("--top-k", type=int, default=config.TOP_K, help="Candidates retrieved per code family.")
+    parser.add_argument(
+        "--mrf-csv",
+        default=None,
+        help="Path to the cleaned MRF CSV (default: PT_MRF_CSV, else config default).",
+    )
+    parser.add_argument(
+        "--qdrant-path",
+        default=None,
+        help="Local Qdrant store directory (default: PT_QDRANT_PATH, else config default).",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Candidates retrieved per code family (default: PT_TOP_K).",
+    )
     parser.add_argument("--device", default="cuda", help="Device for MedGemma (e.g. cuda, cpu).")
 
     parser.add_argument(
@@ -98,22 +111,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         build_parser().print_help()
         return 2
 
+    # Honour a .env (and any PT_* overrides) before resolving any path.
+    config.load_dotenv_files()
+    config.refresh()
+
+    mrf_csv = args.mrf_csv or config.mrf_csv_path()
+    qdrant_path = args.qdrant_path or config.qdrant_dir()
+    top_k = config.top_k() if args.top_k is None else args.top_k
+
     if not args.no_hf_login:
         login_huggingface()
 
     pipe, embed_model = load_models(device=args.device)
 
-    client = get_qdrant_client(args.qdrant_path)
-    mrf_data = load_mrf_data(args.mrf_csv)
+    client = get_qdrant_client(qdrant_path)
+    mrf_data = load_mrf_data(mrf_csv)
 
-    retriever = CodeRetriever(embed_model, client, top_k=args.top_k)
+    retriever = CodeRetriever(embed_model, client, top_k=top_k)
     engine = MedGemmaEngine(pipe)
 
     pipeline = HealthcarePricingPipeline(
         retriever=retriever,
         engine=engine,
         mrf_data=mrf_data,
-        top_k=args.top_k,
+        top_k=top_k,
     )
 
     if args.query:

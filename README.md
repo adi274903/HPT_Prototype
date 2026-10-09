@@ -93,12 +93,28 @@ pip install -e .            # optional: installs the `pt-healthcare` command
 cp .env.example .env        # then edit
 ```
 
+Values are read **when the pipeline is built**, not at import, so a `.env`
+loaded late — the normal Colab case, where the notebook runs somewhere other
+than this repo — still takes effect. The file itself is searched for in the
+working directory, Colab's `/content`, and this repo's root (override with
+`PT_ENV_FILE`). A real environment variable or Colab secret always beats the
+file.
+
 | Variable              | Default                                | Meaning                          |
 | --------------------- | -------------------------------------- | -------------------------------- |
 | `HUGGINGFACE_API_KEY` | —                                      | HF token for gated model access (`HF_TOKEN` / `HUGGINGFACE_HUB_TOKEN` also accepted) |
 | `PT_MRF_CSV`          | `everyUPMCmrf_clean.csv`               | cleaned MRF CSV path             |
 | `PT_QDRANT_PATH`      | `New_PT_DB`                            | local Qdrant store directory     |
 | `PT_TOP_K`            | `10`                                   | candidates retrieved per code set |
+| `PT_ENV_FILE`         | —                                      | explicit `.env` path             |
+
+`PT_MEDGEMMA_MODEL`, `PT_EMBED_MODEL`, `PT_CPT_COLLECTION`,
+`PT_HCPCS_COLLECTION`, `PT_MAX_CANDIDATES`, `PT_CANDIDATE_TEXT_LIMIT` and
+`PT_MAX_NEW_TOKENS` are also honoured; see `.env.example`.
+
+If you only use the module constants (`config.TOP_K`, `config.MRF_CSV_PATH`, …)
+rather than calling the pipeline, call `config.refresh()` after your own
+`load_dotenv()`.
 
 ## Run in Google Colab
 

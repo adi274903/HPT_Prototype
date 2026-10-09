@@ -143,3 +143,37 @@ def test_config_exposes_the_same_resolution(monkeypatch):
 
     monkeypatch.setenv("HF_TOKEN", "alias")
     assert config.hf_token_from_env() == "alias"
+
+
+def test_resolve_mrf_csv_precedence(monkeypatch):
+    monkeypatch.delenv("PT_MRF_CSV", raising=False)
+    assert colab_run.resolve_mrf_csv() == colab_run.DRIVE_MRF_CSV
+    assert colab_run.resolve_mrf_csv("/explicit.csv") == "/explicit.csv"
+
+    monkeypatch.setenv("PT_MRF_CSV", "/from/env.csv")
+    assert colab_run.resolve_mrf_csv() == "/from/env.csv"
+    assert colab_run.resolve_mrf_csv("/explicit.csv") == "/explicit.csv"
+
+
+def test_resolve_qdrant_path_precedence(monkeypatch):
+    monkeypatch.delenv("PT_QDRANT_PATH", raising=False)
+    assert colab_run.resolve_qdrant_path() == colab_run.COLAB_DB_DIR
+    assert colab_run.resolve_qdrant_path("/explicit") == "/explicit"
+
+    monkeypatch.setenv("PT_QDRANT_PATH", "/tmp/db")
+    assert colab_run.resolve_qdrant_path() == "/tmp/db"
+
+
+def test_load_env_reads_a_file_outside_this_repo(tmp_path, monkeypatch):
+    """The Colab case: the .env lives next to the notebook, not in the repo."""
+    monkeypatch.delenv("PT_MRF_CSV", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("PT_MRF_CSV=/from/file.csv\n", encoding="utf-8")
+
+    loaded = colab_run.load_env(str(env_file))
+
+    assert loaded == [str(env_file)]
+    assert colab_run.resolve_mrf_csv() == "/from/file.csv"
+
+    monkeypatch.delenv("PT_MRF_CSV", raising=False)
+    config.refresh()  # leave the module snapshot as we found it

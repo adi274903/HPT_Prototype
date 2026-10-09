@@ -152,14 +152,30 @@ def install_dependencies(
     return subprocess.call(command)
 
 
-def load_env(dotenv_path: str = ".env") -> None:
-    """Load a ``.env`` file if present (the notebook called ``load_dotenv()``)."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:  # python-dotenv absent — rely on the environment
-        return
+def load_env(
+    dotenv_path: Optional[str] = None,
+    verbose: bool = False,
+) -> List[str]:
+    """Load ``.env`` files and refresh the config snapshot; return the paths used.
 
-    load_dotenv(dotenv_path)
+    Searches the working directory, Colab's ``/content`` and this repo's root
+    (or ``dotenv_path`` alone if given), so a ``.env`` that lives outside this
+    repo — the normal Colab case — is still honoured. Existing environment
+    variables and Colab secrets win over file values.
+    """
+    paths = [dotenv_path] if dotenv_path else None
+
+    loaded = config.load_dotenv_files(paths, verbose=verbose)
+    config.refresh()
+
+    if verbose and not loaded:
+        print(
+            "No .env found (looked in "
+            + ", ".join(config.env_file_candidates())
+            + "); using environment variables only."
+        )
+
+    return loaded
 
 
 def hf_token() -> Optional[str]:
@@ -264,6 +280,16 @@ def default_paths() -> Dict[str, str]:
     }
 
 
+def resolve_mrf_csv(explicit: Optional[str] = None) -> str:
+    """explicit argument -> ``PT_MRF_CSV`` -> the Drive path the notebook used."""
+    return explicit or os.getenv("PT_MRF_CSV") or DRIVE_MRF_CSV
+
+
+def resolve_qdrant_path(explicit: Optional[str] = None) -> str:
+    """explicit argument -> ``PT_QDRANT_PATH`` -> the extracted ``/content/New_PT_DB``."""
+    return explicit or os.getenv("PT_QDRANT_PATH") or COLAB_DB_DIR
+
+
 def build_pipeline(
     mrf_csv: Optional[str] = None,
     qdrant_path: Optional[str] = None,
@@ -280,6 +306,9 @@ def build_pipeline(
     - ``pipeline.retriever.embed_model``
     - ``pipeline.mrf_data``              -> row count for the status strip
     - ``pipeline.top_k``
+
+    Paths resolve as explicit argument -> env (``PT_MRF_CSV`` / ``PT_QDRANT_PATH``,
+    including anything from a ``.env``) -> the Colab Drive default.
     """
     load_env()
 
@@ -288,10 +317,10 @@ def build_pipeline(
 
     pipe, embed_model = load_models(device=device)
 
-    client = get_qdrant_client(qdrant_path or COLAB_DB_DIR)
-    mrf_data = load_mrf_data(mrf_csv or DRIVE_MRF_CSV)
+    client = get_qdrant_client(resolve_qdrant_path(qdrant_path))
+    mrf_data = load_mrf_data(resolve_mrf_csv(mrf_csv))
 
-    top_k = top_k or config.TOP_K
+    top_k = config.top_k() if top_k is None else top_k
 
     return HealthcarePricingPipeline(
         retriever=CodeRetriever(embed_model, client, top_k=top_k),
@@ -310,6 +339,7 @@ def setup(
     mrf_csv: Optional[str] = None,
     qdrant_path: Optional[str] = None,
     token: Optional[str] = None,
+    env_file: Optional[str] = None,
     verbose: bool = True,
 ) -> HealthcarePricingPipeline:
     """One-call Colab bootstrap: install deps, mount Drive, stage the DB, wire models.
@@ -318,20 +348,32 @@ def setup(
 
         pipeline = setup()
         pipeline.run("...")
+
+    ``env_file`` points at a specific ``.env``; otherwise the working directory,
+    ``/content`` and the repo root are searched, and any ``PT_*`` value found
+    there wins over the built-in defaults.
     """
     if install:
         install_dependencies()
 
+    # Honour a .env — wherever it lives — before anything reads a path.
+    load_env(env_file, verbose=verbose)
+
     if mount:
         mount_drive()
 
-    resolved_db = qdrant_path or COLAB_DB_DIR
+    resolved_mrf = resolve_mrf_csv(mrf_csv)
+    resolved_db = resolve_qdrant_path(qdrant_path)
 
     if stage:
         resolved_db = stage_db(verbose=verbose)
 
+    if verbose:
+        print(f"MRF CSV   : {resolved_mrf}")
+        print(f"Qdrant DB : {resolved_db}")
+
     return build_pipeline(
-        mrf_csv=mrf_csv,
+        mrf_csv=resolved_mrf,
         qdrant_path=resolved_db,
         device=device,
         top_k=top_k,
@@ -768,8 +810,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-mount", action="store_true", help="Skip drive.mount().")
     parser.add_argument("--no-stage", action="store_true", help="Skip copying/extracting the DB snapshot.")
 
-    parser.add_argument("--mrf-csv", default=DRIVE_MRF_CSV)
-    parser.add_argument("--qdrant-path", default=None, help=f"Default: {COLAB_DB_DIR}")
+    parser.add_argument(
+        "--mrf-csv",
+        default=None,
+        help=f"Default: PT_MRF_CSV from your .env, else {DRIVE_MRF_CSV}",
+    )
+    parser.add_argument(
+        "--qdrant-path",
+        default=None,
+        help=f"Default: PT_QDRANT_PATH from your .env, else {COLAB_DB_DIR}",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Path to a .env (default: search the CWD, /content and the repo root).",
+    )
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--no-hf-login", action="store_true", help="Skip huggingface_hub.login().")
@@ -818,6 +873,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         top_k=args.top_k,
         mrf_csv=args.mrf_csv,
         qdrant_path=args.qdrant_path,
+        env_file=args.env_file,
     )
 
     ui: Optional[UIServer] = None

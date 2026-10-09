@@ -10,7 +10,9 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Sequence
 
-from .config import CANDIDATE_TEXT_LIMIT, MAX_CANDIDATES_PER_FAMILY
+from . import config
+
+__all__ = ["parse_json_output", "compact_candidates"]
 
 
 def parse_json_output(raw_output: Any) -> Dict[str, Any]:
@@ -105,10 +107,15 @@ def parse_json_output(raw_output: Any) -> Dict[str, Any]:
 
 def compact_candidates(
     candidates: Optional[Sequence[Dict[str, Any]]],
-    max_candidates: int = MAX_CANDIDATES_PER_FAMILY,
-    text_limit: int = CANDIDATE_TEXT_LIMIT,
+    max_candidates: Optional[int] = None,
+    text_limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Keep the decision prompt short and remove duplicate codes."""
+    max_candidates = (
+        config.max_candidates_per_family() if max_candidates is None else max_candidates
+    )
+    text_limit = config.candidate_text_limit() if text_limit is None else text_limit
+
     compact: List[Dict[str, Any]] = []
     seen_codes = set()
 

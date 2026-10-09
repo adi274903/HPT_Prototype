@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Mapping, Sequence
 
-from .config import CANDIDATE_TEXT_LIMIT, MAX_CANDIDATES_PER_FAMILY
+from . import config
 from .parsing import compact_candidates
 
 
@@ -103,12 +103,12 @@ def build_decision_prompt(categorization: Mapping[str, Any], user_query: str) ->
     """
     cpt_candidates = compact_candidates(
         categorization.get("cpt_candidates", []),
-        max_candidates=MAX_CANDIDATES_PER_FAMILY,
+        max_candidates=config.max_candidates_per_family(),
     )
 
     hcpcs_candidates = compact_candidates(
         categorization.get("hcpcs_candidates", []),
-        max_candidates=MAX_CANDIDATES_PER_FAMILY,
+        max_candidates=config.max_candidates_per_family(),
     )
 
     return f"""Select billing-code candidates.

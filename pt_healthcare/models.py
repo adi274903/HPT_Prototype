@@ -35,11 +35,11 @@ def load_models(
 
     pipe = pipeline(
         "image-text-to-text",
-        model=config.MEDGEMMA_MODEL_ID,
+        model=config.medgemma_model_id(),
         dtype=dtype,
         device=device,
     )
 
-    embed_model = SentenceTransformer(config.EMBEDDING_MODEL_ID)
+    embed_model = SentenceTransformer(config.embedding_model_id())
 
     return pipe, embed_model

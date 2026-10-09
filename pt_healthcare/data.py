@@ -14,7 +14,13 @@ import pandas as pd
 
 from . import config
 
-DEFAULT_COLLECTIONS: Sequence[str] = (config.CPT_COLLECTION, config.HCPCS_COLLECTION)
+#: Fallback collection names, used only if the environment says nothing.
+DEFAULT_COLLECTIONS: Sequence[str] = ("cpt_medte", "hcpcs_medte")
+
+
+def default_collections() -> Sequence[str]:
+    """The collections to report on, resolved from the environment now."""
+    return (config.cpt_collection(), config.hcpcs_collection())
 
 
 def login_huggingface(token: Optional[str] = None) -> None:
@@ -34,20 +40,24 @@ def login_huggingface(token: Optional[str] = None) -> None:
 
 
 def get_qdrant_client(path: Optional[str] = None, **kwargs: Any) -> Any:
-    """Open a local Qdrant store (the on-disk snapshot directory)."""
+    """Open a local Qdrant store (the on-disk snapshot directory).
+
+    Defaults to ``PT_QDRANT_PATH`` at call time, so a ``.env`` loaded after
+    import still applies.
+    """
     from qdrant_client import QdrantClient
 
-    return QdrantClient(path=path or config.QDRANT_PATH, **kwargs)
+    return QdrantClient(path=path or config.qdrant_dir(), **kwargs)
 
 
 def collection_stats(
     client: Any,
-    collections: Iterable[str] = DEFAULT_COLLECTIONS,
+    collections: Optional[Iterable[str]] = None,
 ) -> Dict[str, int]:
     """Return ``{collection_name: points_count}`` for the given collections."""
     stats: Dict[str, int] = {}
 
-    for collection_name in collections:
+    for collection_name in collections or default_collections():
         info = client.get_collection(collection_name)
         stats[collection_name] = info.points_count
 
@@ -66,8 +76,9 @@ def load_mrf_data(path: Optional[str] = None, low_memory: bool = False) -> pd.Da
     """Load the cleaned hospital MRF CSV.
 
     ``low_memory=False`` avoids the mixed-type ``DtypeWarning`` the prototype
-    emitted and gives stable dtypes for the code/price columns.
+    emitted and gives stable dtypes for the code/price columns. Defaults to
+    ``PT_MRF_CSV`` at call time.
     """
-    csv_path = path or config.MRF_CSV_PATH
+    csv_path = path or config.mrf_csv_path()
 
     return pd.read_csv(csv_path, low_memory=low_memory)

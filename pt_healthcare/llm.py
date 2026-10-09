@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping
 
-from .config import MAX_NEW_TOKENS
+from . import config
 from .prompts import (
     build_answer_prompt,
     build_categorizer_prompt,
@@ -60,7 +60,7 @@ class MedGemmaEngine:
 
         output = self.pipe(
             messages,
-            max_new_tokens=MAX_NEW_TOKENS,
+            max_new_tokens=config.max_new_tokens(),
             do_sample=False,
             return_full_text=True,
         )
@@ -90,6 +90,6 @@ class MedGemmaEngine:
             },
         ]
 
-        output_ = self.pipe(text=messages, max_new_tokens=MAX_NEW_TOKENS)
+        output_ = self.pipe(text=messages, max_new_tokens=config.max_new_tokens())
 
         return output_[0]["generated_text"][-1]["content"]

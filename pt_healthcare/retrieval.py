@@ -11,7 +11,7 @@ from typing import Any, Mapping, Optional
 
 import pandas as pd
 
-from .config import CPT_COLLECTION, HCPCS_COLLECTION, TOP_K
+from . import config
 from .utils import clean_list
 
 _EMPTY_COLUMNS = ["rank", "score", "code", "text"]
@@ -46,11 +46,11 @@ class CodeRetriever:
         self,
         embed_model: Any,
         client: Any,
-        top_k: int = TOP_K,
+        top_k: Optional[int] = None,
     ) -> None:
         self.embed_model = embed_model
         self.client = client
-        self.top_k = top_k
+        self.top_k = config.top_k() if top_k is None else top_k
 
     # ------------------------------------------------------------------
     def retrieve_codes(
@@ -99,7 +99,7 @@ class CodeRetriever:
 
         return self.retrieve_codes(
             query=query,
-            collection_name=CPT_COLLECTION,
+            collection_name=config.cpt_collection(),
             top_k=top_k,
         )
 
@@ -113,6 +113,6 @@ class CodeRetriever:
 
         return self.retrieve_codes(
             query=query,
-            collection_name=HCPCS_COLLECTION,
+            collection_name=config.hcpcs_collection(),
             top_k=top_k,
         )
