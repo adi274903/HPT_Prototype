@@ -469,6 +469,10 @@ def build_orchestrator(
             ExplainTool(pipeline.engine),
         ],
         engine=pipeline.engine,
+        # The price tool announces itself through the pipeline's own logs, but
+        # lookup and explain print nothing. Without this you cannot tell from a
+        # Colab log whether routing ran, or which tool it chose.
+        printer=print,
     )
 
 

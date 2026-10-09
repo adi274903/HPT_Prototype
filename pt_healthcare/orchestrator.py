@@ -11,7 +11,7 @@ as a step of its own.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from . import events as ev
 from . import router
@@ -25,10 +25,25 @@ class Orchestrator:
         self,
         tools: Iterable[Tool],
         engine: Optional[Any] = None,
+        printer: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.tools: Dict[str, Tool] = {tool.name: tool for tool in tools}
         #: Used only for the tie-break when the lexical cues find nothing.
         self.engine = engine
+        #: Optional line sink, silent by default. The price tool already logs
+        #: through the pipeline; a library caller should not get surprise stdout.
+        #: ``colab_run.build_orchestrator`` passes ``print``.
+        self.printer = printer
+
+    def _say(self, line: str) -> None:
+        """One human-readable line, if a printer was supplied."""
+        if self.printer is None:
+            return
+
+        try:
+            self.printer(line)
+        except Exception:
+            pass  # a broken stdout must not fail a run
 
     # ------------------------------------------------------------------
     def tool_names(self) -> List[str]:
@@ -80,11 +95,22 @@ class Orchestrator:
         stream.emit(ev.TOOL_CALLED, tool=tool.name, codes=intent.codes)
         stream.emit(ev.STAGE_FINISHED, stage="intent")
 
+        self._say(
+            f"[orchestrator] tool={intent.tool} "
+            f"({intent.source}: {intent.reason})"
+        )
+
+        if intent.codes:
+            self._say(f"[orchestrator] codes={intent.codes}")
+
         try:
             result = tool.run(query, intent, stream)
         except Exception as exc:
             stream.emit(ev.ERROR, tool=tool.name, message=repr(exc))
             raise
+
+        for note in result.notes:
+            self._say(f"[orchestrator] note: {note}")
 
         stream.emit(
             ev.TOOL_RESULT,

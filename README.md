@@ -306,6 +306,20 @@ run = orchestrator.run("what is CPT 45378?")
 print(run["tool"], "->", run["answer"])
 ```
 
+`build_orchestrator()` passes `print` as the orchestrator's printer, so a run
+announces its choice before doing any work:
+
+```
+[orchestrator] tool=explain (default: no price, code or facility cue)
+```
+
+That line earns its place. The price tool announces itself through the pipeline's
+own `STEP n/7` logs, but `lookup` and `explain` print nothing else — so without it
+a correctly-routed definition question produces **no log output at all**, and is
+indistinguishable from a run that never happened. `Orchestrator` is silent by
+default; only the Colab surface opts in, so a library caller gets no surprise
+stdout.
+
 ### Events, so a UI can fill a block as it fills
 
 `ui/pt_serve.py` reverse-engineers the pipeline's log strings. That gives a live
