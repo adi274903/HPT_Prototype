@@ -154,6 +154,35 @@ class HealthcarePricingPipeline:
         categorized.setdefault("insurer", [])
         categorized.setdefault("medication", [])
 
+        categorizer_attempts = 1
+
+        # The hospital and insurer categories are handed a closed set of real
+        # values; medical and medication are not. The model has repeatedly filled
+        # the two categories that have lists and returned `medical: []` for a query
+        # that plainly names a procedure — "Cost of colonoscopy at UPMC Presby?"
+        # came back as medical [] with the facility extracted correctly. Those runs
+        # also finished in ~2.5-2.9s with no reasoning trace, against 16-24s when
+        # the model reasoned and extracted correctly.
+        #
+        # So: when no procedure comes back, ask once more with the reference lists
+        # omitted — that list is the one variable that differs between the two
+        # categories, and the cost is ~3s against an answer built on the whole
+        # facility. This is a hypothesis being tested in production, not a proven
+        # fix, so it reports itself in the log and in the result.
+        if not categorized["medical"]:
+            log("\nNo medical entity extracted — retrying without the reference lists.")
+
+            raw_retry = self.engine.categorize(user_query)
+            retry = parse_json_output(raw_retry)
+
+            categorizer_attempts = 2
+
+            if retry.get("medical"):
+                log(f"Retry extracted: medical={retry['medical']}")
+                categorized["medical"] = retry["medical"]
+            else:
+                log("Retry extracted nothing either — continuing without a procedure.")
+
         log(f"\nCategorization completed in {time.perf_counter() - t0:.2f}s")
         log(f"Medical terms: {categorized['medical']}")
         log(f"Hospitals: {categorized['hospital']}")
@@ -406,6 +435,7 @@ class HealthcarePricingPipeline:
                 },
                 "answer": answer,
                 "total_seconds": total_time,
+                "categorizer_attempts": categorizer_attempts,
                 "stopped": "nothing_to_filter",
             }
 
@@ -512,6 +542,7 @@ class HealthcarePricingPipeline:
             "code_plausible": code_plausible,
             "answer": answer,
             "total_seconds": total_time,
+            "categorizer_attempts": categorizer_attempts,
         }
 
 

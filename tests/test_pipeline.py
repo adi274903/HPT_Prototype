@@ -116,6 +116,7 @@ def test_pipeline_returns_expected_keys_and_filters_prices():
 
     assert set(result) == {
         "categorized",
+        "categorizer_attempts",
         "cpt_candidates",
         "hcpcs_candidates",
         "output",
@@ -338,6 +339,102 @@ def test_a_normal_run_is_unaffected_by_the_guard():
 
     assert "stopped" not in result
     assert result["code_plausible"]["match_count"] == 1
+
+
+class SequencingEngine:
+    """Returns a different categorizer reply per call, to exercise the retry."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+        self.answer_args = None
+
+    def categorize(self, user_query, hospitals=(), insurers=()):
+        self.calls.append(
+            {"hospitals": list(hospitals), "insurers": list(insurers)}
+        )
+        return self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
+
+    def decide(self, categorization, user_query):
+        return json.dumps(
+            {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
+        )
+
+    def answer(self, user_query, output, code_plausible):
+        self.answer_args = (user_query, output, code_plausible)
+        return "FINAL ANSWER"
+
+
+EMPTY_MEDICAL = json.dumps(
+    {
+        "medical": [],
+        "hospital": ["UPMC Presby"],
+        "insurer": [],
+        "medication": [],
+    }
+)
+
+HAS_MEDICAL = json.dumps(
+    {
+        "medical": ["colonoscopy"],
+        "hospital": [],
+        "insurer": [],
+        "medication": [],
+    }
+)
+
+
+def test_an_empty_medical_list_is_retried_without_the_reference_lists():
+    """The reported failure: "Cost of colonoscopy at UPMC Presby?" -> medical [].
+
+    Two categories are given a closed set of values and two are not, so the retry
+    drops that list — it is the only variable that separates them.
+    """
+    engine = SequencingEngine([EMPTY_MEDICAL, HAS_MEDICAL])
+    pipeline = HealthcarePricingPipeline(
+        retriever=FakeRetriever(cpt_candidates(), hcpcs_candidates()),
+        engine=engine,
+        mrf_data=make_mrf(),
+    )
+
+    result = pipeline.run("Cost of colonoscopy at UPMC Presby?", verbose=False)
+
+    assert len(engine.calls) == 2
+    assert engine.calls[0]["hospitals"], "first attempt should get the lists"
+    assert not engine.calls[1]["hospitals"], "the retry must omit them"
+
+    assert result["categorized"]["medical"] == ["colonoscopy"]
+    assert result["categorizer_attempts"] == 2
+
+
+def test_a_good_extraction_is_not_retried():
+    engine = SequencingEngine([HAS_MEDICAL])
+    pipeline = HealthcarePricingPipeline(
+        retriever=FakeRetriever(cpt_candidates(), hcpcs_candidates()),
+        engine=engine,
+        mrf_data=make_mrf(),
+    )
+
+    result = pipeline.run("colonoscopy cost", verbose=False)
+
+    assert len(engine.calls) == 1
+    assert result["categorizer_attempts"] == 1
+
+
+def test_a_retry_that_fails_too_falls_through():
+    """One retry, no loop: a second empty result proceeds as before."""
+    engine = SequencingEngine([EMPTY_MEDICAL, EMPTY_MEDICAL])
+    pipeline = HealthcarePricingPipeline(
+        retriever=FakeRetriever(cpt_candidates(), hcpcs_candidates()),
+        engine=engine,
+        mrf_data=make_mrf(),
+    )
+
+    result = pipeline.run("Cost of colonoscopy at UPMC Presby?", verbose=False)
+
+    assert len(engine.calls) == 2
+    assert result["categorizer_attempts"] == 2
+    assert result["categorized"]["medical"] == []
 
 
 def test_top_k_is_forwarded_to_the_retriever():
