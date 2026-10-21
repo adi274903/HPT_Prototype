@@ -170,10 +170,36 @@ def max_new_tokens() -> int:
     return _get_int("PT_MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS)
 
 
+def llm_backend() -> str:
+    """Which generator ``load_models`` builds.
+
+    ``transformers`` (default, in-process bfloat16), ``llamacpp`` (in-process GGUF
+    through llama_cpp), ``vllm`` (in-process through vllm.LLM), or ``remote`` (an
+    OpenAI-compatible server someone else is running).
+    """
+    name = _get("PT_LLM_BACKEND", "transformers").strip().lower()
+    return name or "transformers"
+
+
+def llm_gguf_path() -> str:
+    """GGUF for the llamacpp backend, e.g. medgemma-1.5-4b-it-Q4_K_M.gguf."""
+    return _get("PT_LLM_GGUF", "")
+
+
+def llm_n_gpu_layers() -> int:
+    """-1 offloads the whole model; 0 is CPU-only."""
+    return _get_int("PT_LLM_N_GPU_LAYERS", -1)
+
+
+def llm_max_model_len() -> int:
+    """KV-cache ceiling for vLLM / n_ctx for llama.cpp."""
+    return _get_int("PT_LLM_MAX_MODEL_LEN", 8192)
+
+
 def llm_base_url() -> str:
     """OpenAI-compatible backend, e.g. ``http://127.0.0.1:8080/v1``.
 
-    Empty means "load MedGemma in-process with transformers", the notebook path.
+    Empty means "load MedGemma in this process", the notebook path.
     """
     return _get("PT_LLM_BASE_URL", "").rstrip("/")
 
