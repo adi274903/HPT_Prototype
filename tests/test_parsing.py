@@ -1,6 +1,6 @@
 import pytest
 
-from pt_healthcare.parsing import compact_candidates, parse_json_output
+from pt_healthcare.parsing import compact_candidates, parse_json_output, split_reasoning
 
 
 def test_parse_plain_json():
@@ -74,3 +74,48 @@ def test_compact_candidates_respects_max():
 
 def test_compact_candidates_handles_none():
     assert compact_candidates(None) == []
+
+
+# ── split_reasoning: the scratchpad must never reach the patient ────────────
+
+def test_split_reasoning_takes_the_thought_out_of_the_answer():
+    raw = (
+        "<unused94>thought\n"
+        "Identify the core request: a price for a colonoscopy.\n"
+        "CPT candidates are 45378, 45380, 45385.\n"
+        "<unused95>\n"
+        "A colonoscopy at UPMC Altoona is $1,250 under Cigna Commercial."
+    )
+
+    reasoning, answer = split_reasoning(raw)
+
+    assert reasoning.startswith("Identify the core request")
+    assert "45378" in reasoning
+    assert "<unused" not in reasoning and "<unused" not in answer
+    assert answer == "A colonoscopy at UPMC Altoona is $1,250 under Cigna Commercial."
+
+
+def test_split_reasoning_without_a_closer_produces_no_answer():
+    reasoning, answer = split_reasoning("<unused94>thought\nStill weighing candidates 45378")
+
+    assert "Still weighing candidates" in reasoning
+    assert answer == ""
+
+
+def test_split_reasoning_leaves_a_clean_answer_alone():
+    reasoning, answer = split_reasoning("  A knee x-ray is $180 at UPMC Horizon.  ")
+
+    assert reasoning == ""
+    assert answer == "A knee x-ray is $180 at UPMC Horizon."
+
+
+def test_split_reasoning_handles_a_bare_closer():
+    reasoning, answer = split_reasoning("weighing options<unused95>The rate is $942.")
+
+    assert reasoning == "weighing options"
+    assert answer == "The rate is $942."
+
+
+def test_split_reasoning_survives_missing_or_odd_input():
+    assert split_reasoning(None) == ("", "")
+    assert split_reasoning("") == ("", "")

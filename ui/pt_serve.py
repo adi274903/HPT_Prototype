@@ -52,6 +52,39 @@ __all__ = ["launch", "serve", "render", "build_static_html", "to_payload", "Serv
 _EMBEDDED_HTML_B64 = ""
 _EMBEDDED_PATIENT_B64 = ""
 
+_THOUGHT_OPEN = re.compile(r"<unused94>", re.IGNORECASE)
+_THOUGHT_CLOSE = re.compile(r"<unused95>", re.IGNORECASE)
+
+
+def split_reasoning(raw_output: Any) -> tuple[str, str]:
+    """Split a MedGemma answer into ``(reasoning, answer)``.
+
+    Mirrors ``pt_healthcare.parsing.split_reasoning`` and is duplicated rather
+    than imported on purpose: this module is loaded standalone (Colab, the test
+    harness), where the package is not on the path. The patient page must never
+    render a model scratchpad, whatever backend version is behind it.
+    """
+    if not isinstance(raw_output, str):
+        return "", "" if raw_output is None else str(raw_output)
+
+    opener = _THOUGHT_OPEN.search(raw_output)
+    if opener:
+        tail = raw_output[opener.end() :]
+        closer = _THOUGHT_CLOSE.search(tail)
+        if closer:
+            reasoning, answer = tail[: closer.start()], tail[closer.end() :]
+        else:
+            # Truncated mid-thought: generation never reached an answer.
+            reasoning, answer = tail, ""
+        reasoning = re.sub(r"^\s*thought\b", "", reasoning, flags=re.IGNORECASE)
+        return reasoning.strip(), answer.strip()
+
+    closer = _THOUGHT_CLOSE.search(raw_output)
+    if closer:
+        return raw_output[: closer.start()].strip(), raw_output[closer.end() :].strip()
+
+    return "", raw_output.strip()
+
 # Which page each URL serves. The patient chat is the product surface, so it
 # owns "/"; the pipeline dashboard is one link away.
 _ROUTES = {
@@ -204,6 +237,14 @@ def to_payload(
     rejected = _parse_rejections(run_log)
     raw_cat, raw_decision = _parse_raw(run_log)
 
+    # The one boundary every answer crosses, whatever produced it: strip the
+    # model's <unused94>thought ... <unused95> scratchpad here so it can never
+    # reach a patient, and keep it for the Thinking tab.
+    reasoning, answer = split_reasoning(result.get("answer") or "")
+    if not reasoning:
+        # A backend that already split it hands the reasoning over separately.
+        reasoning = str(result.get("reasoning") or "")
+
     return {
         "query": query,
         "mode": mode,
@@ -227,7 +268,10 @@ def to_payload(
             },
             "price_summary": price_summary,
         },
-        "answer": str(result.get("answer") or ""),
+        "answer": answer,
+        # Model scratchpad, split off the answer above. Shown only in the
+        # patient page's Thinking tab.
+        "reasoning": reasoning,
         "raw": {"categorization": raw_cat, "decision": raw_decision},
         "stages": stages or _stages_from_log(run_log) or _blank_stages(done=True),
         "total_seconds": float(

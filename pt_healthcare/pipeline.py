@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import pandas as pd
 
 from . import config
+from .parsing import split_reasoning
 from .pricing import sql_answer
 from .utils import clean_list
 from .vocabulary import column_vocabulary, drop_placeholders, resolve_to_vocabulary
@@ -399,8 +400,14 @@ class HealthcarePricingPipeline:
             output=output,
             code_plausible=code_plausible,
         )
+        # MedGemma prefixes the answer with a <unused94>thought ... <unused95>
+        # block. It is scratchpad, not an answer — keep it for the Thinking
+        # tab, never in the text a patient reads.
+        reasoning, answer = split_reasoning(answer)
 
         log(f"Answer generation completed in {time.perf_counter() - t0:.2f}s")
+        if reasoning:
+            log(f"({len(reasoning)} characters of model reasoning set aside)")
         log("\nFINAL ANSWER:")
         log(str(answer))
 
@@ -417,6 +424,7 @@ class HealthcarePricingPipeline:
             "output": output,
             "code_plausible": code_plausible,
             "answer": answer,
+            "reasoning": reasoning,
             "total_seconds": total_time,
         }
 

@@ -12,7 +12,58 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import config
 
-__all__ = ["parse_json_output", "compact_candidates"]
+__all__ = ["parse_json_output", "compact_candidates", "split_reasoning"]
+
+_THOUGHT_OPEN = re.compile(r"<unused94>", re.IGNORECASE)
+_THOUGHT_CLOSE = re.compile(r"<unused95>", re.IGNORECASE)
+_ANY_CONTROL = re.compile(r"</?unused\d+>", re.IGNORECASE)
+
+
+def _tidy(text: str) -> str:
+    text = text.replace("\r\n", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def split_reasoning(raw_output: Any) -> tuple[str, str]:
+    """Divide a MedGemma answer into ``(reasoning, answer)``.
+
+    MedGemma opens its scratchpad with ``<unused94>thought`` and closes it with
+    ``<unused95>``. Both the tokens and the text between them are reasoning,
+    not an answer: read by a patient it sounds like the tool talking to itself.
+    The reasoning is kept so the UI can show it in a "Thinking" tab; the answer
+    never contains it.
+
+    Either side may be empty. An unclosed reasoning block means generation
+    stopped before an answer existed, so the answer comes back empty rather
+    than half a thought.
+    """
+    if raw_output is None:
+        return "", ""
+    if not isinstance(raw_output, str):
+        return "", str(raw_output)
+
+    text = raw_output
+    opener = _THOUGHT_OPEN.search(text)
+
+    if opener:
+        tail = text[opener.end() :]
+        closer = _THOUGHT_CLOSE.search(tail)
+        if closer:
+            reasoning = tail[: closer.start()]
+            answer = tail[closer.end() :]
+        else:
+            reasoning, answer = tail, ""
+        # The sentinel word itself is not reasoning.
+        reasoning = re.sub(r"^\s*thought\b", "", reasoning, flags=re.IGNORECASE)
+        return _tidy(reasoning), _tidy(answer)
+
+    closer = _THOUGHT_CLOSE.search(text)
+    if closer:
+        # Some templates consume the opener before we see the text.
+        return _tidy(text[: closer.start()]), _tidy(text[closer.end() :])
+
+    return "", _tidy(_ANY_CONTROL.sub("", text))
 
 
 def parse_json_output(raw_output: Any) -> Dict[str, Any]:
