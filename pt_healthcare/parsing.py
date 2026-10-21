@@ -67,12 +67,19 @@ def split_reasoning(raw_output: Any) -> tuple[str, str]:
 
 
 def strip_thought(raw_output: Any) -> str:
-    """The answer text with any ``<unused94>thought … <unused95>`` block removed.
+    """Drop the reasoning trace, keeping whatever text follows it.
 
-    Kept for the orchestrator path, which predates :func:`split_reasoning` and only
-    ever wanted the answer half. One implementation, two callers.
+    The orchestrator path only ever wants the answer half. It deliberately differs
+    from :func:`split_reasoning` on one input: an *unclosed* thought block. The
+    pipeline must not price a half-finished thought, so it returns an empty answer;
+    the router is reading a one-word classification like ``<unused94>price`` and
+    wants the word, so here the control tokens are simply stripped.
     """
-    return split_reasoning(raw_output)[1]
+    text = str(raw_output or "")
+    closer = _THOUGHT_CLOSE.search(text)
+    if closer:
+        return _tidy(text[closer.end() :])
+    return _tidy(_ANY_CONTROL.sub("", text))
 
 
 def parse_json_output(raw_output: Any) -> Dict[str, Any]:
