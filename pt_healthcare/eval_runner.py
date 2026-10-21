@@ -523,6 +523,18 @@ class Pricer:
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+    def row_details(self, row_ids: Iterable[str]) -> List[Dict[str, Any]]:
+        """The same columns the pipeline's DataFrame carries, for the scored ids."""
+        ids = [str(row_id) for row_id in row_ids]
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        cursor = self.con.execute(
+            "SELECT row_id, hospital, payer, plan, setting, cpt, hcpcs, rate, cash "
+            f"FROM rows_ext WHERE row_id IN ({placeholders})", ids)
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
     def keyed_rates(self, row_ids: Sequence[str]) -> Tuple[Set[float], Set[float]]:
         if not row_ids:
             return set(), set()
@@ -538,6 +550,30 @@ class Pricer:
 # ---------------------------------------------------------------------------
 # one case
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class Observation:
+    """What one run produced, before any judgement is attached to it.
+
+    The point of the split: two very different callers produce an ``Observation`` —
+    the standalone harness, which drives the four prompts itself, and
+    ``eval_pipeline``, which lets the real orchestrator run — and both are scored by
+    the same code below, so the numbers stay comparable.
+    """
+
+    codes: Sequence[str] = ()
+    ranked: Sequence[str] = ()
+    rows: Sequence[Mapping[str, Any]] = ()
+    rows_substring: Sequence[Mapping[str, Any]] = ()
+    text: str = ""
+    categorized: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    intent: Optional[str] = None
+    hallucinated: Sequence[str] = ()
+    latency: Mapping[str, float] = field(default_factory=dict)
+    parse_failures: Sequence[str] = ()
+    errors: Sequence[str] = ()
+    extra: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -642,7 +678,59 @@ class Runner:
             record["parse_failures"].append("answer")
         record["answer"] = text
 
-        # ---- scores ---------------------------------------------------------
+        return self.score(case, target, Observation(
+            codes=predicted_codes, ranked=ranked, rows=rows, rows_substring=rows_substring,
+            text=text, categorized=categorized, intent=predicted_intent,
+            hallucinated=record["hallucinated_codes"], latency=record["latency_ms"],
+            parse_failures=record["parse_failures"], errors=record["errors"],
+        ))
+
+    def score(self, case: Mapping[str, Any], target: Mapping[str, Any],
+              obs: Observation) -> Dict[str, Any]:
+        return score_observation(case, target, obs, self.pricer)
+
+
+def score_observation(case: Mapping[str, Any], target: Mapping[str, Any],
+                      obs: Observation, pricer: Any) -> Dict[str, Any]:
+        """Score one observation against the answer key.
+
+        Everything numeric lives here, so the orchestrator path and the standalone
+        path cannot drift apart. ``pricer`` only has to offer ``row_details()`` and
+        ``keyed_rates()``: the duckdb :class:`Pricer`, or the DataFrame one in
+        ``eval_pipeline``.
+        """
+        truth_codes_mrf = {str(code) for code in case.get("ground_truth_code_MRF") or []}
+        truth_codes_all = {str(code) for code in case.get("ground_truth_codes") or []}
+        truth_rows = {str(row) for row in case.get("ground_truth_row_ids") or []}
+        predicted_codes = list(obs.codes)
+        ranked = list(obs.ranked)
+        rows = list(obs.rows)
+        rows_substring = list(obs.rows_substring)
+        text = obs.text
+        categorized = {field_name: list(obs.categorized.get(field_name) or [])
+                       for field_name in FIELD_ORDER}
+        predicted_rows = {str(row["row_id"]) for row in rows}
+        predicted_rows_substring = {str(row["row_id"]) for row in rows_substring}
+
+        record: Dict[str, Any] = {
+            "eval_id": case["eval_id"], "subtype": target.get("subtype"),
+            "intent_target": target.get("intent"), "n_rows_gt": len(truth_rows),
+            "n_codes_gt": len(truth_codes_mrf),
+            "intent_pred": obs.intent,
+            "hallucinated_codes": list(obs.hallucinated),
+            "codes_pred": sorted(predicted_codes), "rows_pred": sorted(predicted_rows),
+            "rates_pred": sorted({float(row["rate"]) for row in rows if row.get("rate") is not None}),
+            "cash_pred": sorted({float(row["cash"]) for row in rows if row.get("cash") is not None}),
+            "extraction": categorized, "answer": text,
+            "latency_ms": dict(obs.latency),
+            "parse_failures": list(obs.parse_failures), "errors": list(obs.errors),
+            "retrieval": {"recall_at_k": recall_at_k(ranked, truth_codes_mrf, len(ranked)),
+                          "mrr": reciprocal_rank(ranked, truth_codes_mrf),
+                          "n_candidates": len(ranked)},
+        }
+        if obs.extra:
+            record["extra"] = dict(obs.extra)
+
         pivot = str(case["eval_id"]).split("_")[0].upper()
         record["pivot"] = pivot
         record["codes"] = {
@@ -661,10 +749,10 @@ class Runner:
             "sql_exact": predicted_rows == truth_rows,
             "sql_exact_substring": predicted_rows_substring == truth_rows,
             "any_hit": bool(predicted_rows & truth_rows),
-            "dice_collapsed": dice(collapse(rows), collapse_rows_from_ids(self.pricer, sorted(truth_rows))),
+            "dice_collapsed": dice(collapse(rows), collapse_rows_from_ids(pricer, sorted(truth_rows))),
         }
 
-        keyed_rates, keyed_cash = self.pricer.keyed_rates(sorted(truth_rows))
+        keyed_rates, keyed_cash = pricer.keyed_rates(sorted(truth_rows))
         allowed_truth = keyed_rates | keyed_cash
         allowed_returned = set(record["rates_pred"]) | set(record["cash_pred"])
         cited = amounts(text)
@@ -699,16 +787,9 @@ def collapse(rows: Sequence[Mapping[str, Any]]) -> Set[str]:
     return out
 
 
-def collapse_rows_from_ids(pricer: Pricer, row_ids: Iterable[str]) -> Set[str]:
-    row_ids = list(row_ids)
-    if not row_ids:
-        return set()
-    placeholders = ",".join("?" * len(row_ids))
-    rows = pricer.con.execute(
-        f"SELECT cpt, hcpcs, hospital, payer FROM rows_ext WHERE row_id IN ({placeholders})",
-        [str(row_id) for row_id in row_ids]).fetchall()
-    return collapse([{"cpt": cpt, "hcpcs": hcpcs, "hospital": hospital, "payer": payer}
-                     for cpt, hcpcs, hospital, payer in rows])
+def collapse_rows_from_ids(pricer: Any, row_ids: Iterable[str]) -> Set[str]:
+    """Collapse the key's rows. Works for the duckdb pricer and the DataFrame one."""
+    return collapse(pricer.row_details(row_ids))
 
 
 # ---------------------------------------------------------------------------
@@ -840,16 +921,18 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
         "ner": {"per_field": ner_block,
                 "macro_f1": mean(value["f1"] for value in ner_block.values()),
                 "macro_f1_per_case": mean(value["f1_per_case"] for value in ner_block.values())},
-        "intent": {
+        "intent": ({
+            "measured": True,
             "accuracy": ratio(sum(1 for record in records
-                                  if record["intent_pred"] == record["intent_target"]), len(records)),
+                                  if record["intent_pred"] == record["intent_target"]
+                                  and record.get("intent_pred") is not None), len(records)),
             "per_class": per_class_f1(records, INTENT_LABELS),
             "macro_f1": mean(value["f1"] for value in per_class_f1(records, INTENT_LABELS).values()
                              if value["support"] > 0),
             "labels_present": sorted(label for label, block in
                                      per_class_f1(records, INTENT_LABELS).items() if block["support"] > 0),
             "confusion": confusion(records),
-        },
+        } if any(record.get("intent_pred") for record in records) else {"measured": False, "reason": "no router stage"}),
         "retrieval": {
             "recall_at_k": mean(record["retrieval"]["recall_at_k"] for record in records),
             "mrr": mean(record["retrieval"]["mrr"] for record in records),
@@ -864,8 +947,11 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
             "parse_failures_by_step": {
                 step: sum(1 for record in records if step in record["parse_failures"])
                 for step in ("intent", "extract", "decide", "answer")},
-            "latency_ms": {step: {"mean": mean(record["latency_ms"][step] for record in records),
-                                  "p95": percentile([record["latency_ms"][step] for record in records], 0.95)}
+            # A pipeline run has one wall clock, not four prompt timings; .get() keeps
+            # both shapes in the same report instead of a KeyError.
+            "latency_ms": {step: {"mean": mean(record["latency_ms"].get(step) for record in records),
+                                  "p95": percentile([record["latency_ms"][step] for record in records
+                                                     if record["latency_ms"].get(step) is not None], 0.95)}
                            for step in ("intent", "extract", "decide", "answer")},
             "tokens": {"prompt": meta.get("prompt_tokens"), "completion": meta.get("completion_tokens")},
         },
@@ -938,9 +1024,12 @@ def format_report(report: Mapping[str, Any]) -> str:
     lines.append(f"  macro F1: {num(report['ner']['macro_f1'])}")
     lines.append("")
     lines.append("INTENT")
-    lines.append(f"  accuracy : {pct(report['intent']['accuracy'])}")
-    lines.append(f"  macro F1 : {num(report['intent']['macro_f1'])}")
-    for label, block in report["intent"]["per_class"].items():
+    if not report["intent"].get("measured", True):
+        lines.append("  not measured — this pipeline has no router stage")
+    else:
+        lines.append(f"  accuracy : {pct(report['intent']['accuracy'])}")
+        lines.append(f"  macro F1 : {num(report['intent']['macro_f1'])}")
+    for label, block in report["intent"].get("per_class", {}).items():
         lines.append(f"  {label:<19} P {num(block['precision'])}  R {num(block['recall'])}  "
                      f"F1 {num(block['f1'])}  n={block['support']}")
     lines.append("")
