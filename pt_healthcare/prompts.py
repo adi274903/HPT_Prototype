@@ -81,6 +81,49 @@ def build_categorizer_prompt(user_query: str) -> str:
     """
 
 
+def build_intent_prompt(user_query: str) -> str:
+    """Classify what the patient is asking for: one of three labels.
+
+    The pipeline's ordinary flow has no intent stage — ``sql_answer`` filters and
+    the answer prompt writes prose. Evaluation needs the label, so it is asked for
+    explicitly and scored on its own. Keeping the three labels disjoint is what
+    makes the metric meaningful: ``hospital_comparison`` and ``cash_vs_insurance``
+    are the only questions whose correct answer is not a single number.
+    """
+    return f"""You are a healthcare-query intent classifier.
+
+    Classify the user's query into exactly one of three labels:
+
+    - "price_lookup": the patient wants to know what one service costs, at a named
+      or unnamed place. Asking which hospital to use, or whether something is
+      covered, is still a price_lookup.
+    - "hospital_comparison": the patient wants two named hospitals compared on
+      price for the same service.
+    - "cash_vs_insurance": the patient wants the self-pay (discounted cash) price
+      compared with their insured negotiated rate.
+
+    Return ONLY valid JSON, no explanation, no Markdown:
+    {{"intent": "price_lookup"}}
+
+    Examples:
+
+    Query: How much is a colonoscopy at UPMC Presbyterian with UPMC Health Plan?
+    Output: {{"intent": "price_lookup"}}
+
+    Query: Is Upmc Altoona or Upmc Hamot cheaper for an MRI on Aetna?
+    Output: {{"intent": "hospital_comparison"}}
+
+    Query: Should I pay cash or use my Highmark plan for a knee scope at Upmc Magee?
+    Output: {{"intent": "cash_vs_insurance"}}
+
+    Now classify this query:
+
+    Query: {user_query}
+
+    JSON:
+    """
+
+
 def build_decision_prompt(categorization: Mapping[str, Any], user_query: str) -> str:
     """Ask MedGemma to choose a small set of CPT/HCPCS code candidates.
 
@@ -106,6 +149,8 @@ CPT candidates:
 
 HCPCS candidates:
 {json.dumps(hcpcs_candidates, ensure_ascii=False)}
+
+Query: {user_query}
 
 Return ONLY one complete JSON object. No thought, explanation, Markdown, or text outside JSON.
 

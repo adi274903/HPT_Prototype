@@ -121,6 +121,7 @@ def test_pipeline_returns_expected_keys_and_filters_prices():
         "output",
         "code_plausible",
         "answer",
+        "reasoning",
         "total_seconds",
     }
     assert result["output"]["cpt_list"] == ["77065"]
