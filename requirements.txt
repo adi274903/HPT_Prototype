@@ -10,3 +10,4 @@ qdrant-client>=1.9
 pandas>=2.0
 numpy>=1.26
 python-dotenv>=1.0
+duckdb
