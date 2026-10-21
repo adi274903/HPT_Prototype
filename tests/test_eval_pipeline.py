@@ -247,3 +247,36 @@ def test_a_salvaged_decision_is_recorded_but_does_not_touch_the_key():
     assert "generate_decision_recovered" in GENERATED_COLUMNS
     assert case == before                      # the key is copied, never edited
     assert row["generate_cpt"] == ["77065"]
+
+
+# ---------------------------------------------------------------------------
+# with_intent: a bolt-on call that must not shadow module-level names
+# ---------------------------------------------------------------------------
+def test_generate_with_intent_does_not_shadow_config(monkeypatch, tmp_path):
+    """Reproduces the UnboundLocalError: a local `from . import config` made the
+    module-level one unbound, and every 600-case run died before case one."""
+    from pt_healthcare import eval_runner
+
+    class Reply:
+        text = "price"
+
+        def __init__(self):
+            self.prompts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.seen = []
+
+        def complete(self, prompt, max_tokens=None):
+            self.seen.append(prompt)
+            return Reply()
+
+    fake = FakeClient()
+    monkeypatch.setattr(eval_runner, "build_client", lambda *args, **kwargs: fake)
+
+    rows = generate(pipeline=oracle(), dataset=DATASET, out=tmp_path / "g.jsonl",
+                    per_subtype=1, with_intent=True, progress=None)
+
+    assert len(rows) == 10
+    assert all(row["generate_intent"] == "price" for row in rows)
+    assert len(fake.seen) == 10               # one routing call per case, no more

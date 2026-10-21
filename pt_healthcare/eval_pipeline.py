@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from . import config
+from .prompts import build_intent_prompt
 from .eval_runner import (
     FIELD_ORDER,
     Observation,
@@ -489,9 +490,6 @@ def generate(*, pipeline: Optional[Any] = None, engine: Optional[RecordingEngine
                       "answer": "", "total_seconds": time.perf_counter() - started}
         if intent_client is not None:
             try:
-                from . import config
-                from .prompts import build_intent_prompt
-
                 intent_prompt = build_intent_prompt(case["eval_query"])
                 # A thinking model spends the first tokens on <unused94>thought;
                 # 8 guaranteed only "thought", never the label.
