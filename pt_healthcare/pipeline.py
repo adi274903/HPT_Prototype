@@ -136,7 +136,7 @@ class HealthcarePricingPipeline:
         log("\nRaw categorizer output:")
         log(repr(raw_categorization))
 
-        from .parsing import parse_json_output
+        from .parsing import parse_json_output, recover_selection
 
         categorized = parse_json_output(raw_categorization)
 
@@ -189,30 +189,8 @@ class HealthcarePricingPipeline:
             "hcpcs_candidates": hcpcs_candidates.to_dict(orient="records"),
         }
 
-        t0 = time.perf_counter()
-
-        raw_output = self.engine.decide(
-            categorization=decision_context,
-            user_query=user_query,
-        )
-
-        log("\nRaw decision-model output:")
-        log(repr(raw_output))
-
-        output = parse_json_output(raw_output)
-
-        log(f"\nDecision completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
-        log("Unvalidated decision:")
-        log(str(output))
-
-        # ---------------------------------------------------------
-        # 5. Validate codes
-        # ---------------------------------------------------------
-        log("\n" + "=" * 80)
-        log("STEP 5/7 — Validating selected codes against Qdrant candidates")
-
-        t0 = time.perf_counter()
-
+        # The candidate sets are needed to validate the decision *and* to salvage one,
+        # so build them before the model runs.
         retrieved_cpt_codes = set(
             cpt_candidates.get("code", pd.Series(dtype=str))
             .dropna()
@@ -230,6 +208,45 @@ class HealthcarePricingPipeline:
             .str.upper()
             .tolist()
         )
+
+        t0 = time.perf_counter()
+
+        raw_output = self.engine.decide(
+            categorization=decision_context,
+            user_query=user_query,
+        )
+
+        log("\nRaw decision-model output:")
+        log(repr(raw_output))
+
+        # A thinking model can burn the whole budget inside <unused94>thought and
+        # never emit the JSON. That is one case, not one dead request: keep what it
+        # named that retrieval actually offered, and say so in the result.
+        decision_error: Optional[str] = None
+        try:
+            output = parse_json_output(raw_output)
+            decision_recovered = False
+        except ValueError as error:
+            decision_error = str(error).strip().splitlines()[0]
+            output = recover_selection(raw_output, retrieved_cpt_codes,
+                                       retrieved_hcpcs_codes)
+            decision_recovered = output is not None
+            if output is None:
+                output = {"use_codes": "none", "cpt_list": [], "hcpcs_list": []}
+            log(f"\nDecision output was unusable ({decision_error}); "
+                f"recovered={decision_recovered}: {output}")
+
+        log(f"\nDecision completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
+        log("Unvalidated decision:")
+        log(str(output))
+
+        # ---------------------------------------------------------
+        # 5. Validate codes
+        # ---------------------------------------------------------
+        log("\n" + "=" * 80)
+        log("STEP 5/7 — Validating selected codes against Qdrant candidates")
+
+        t0 = time.perf_counter()
 
         requested_cpt = clean_list(output.get("cpt_list", []))
         requested_hcpcs = clean_list(output.get("hcpcs_list", []))
@@ -359,6 +376,8 @@ class HealthcarePricingPipeline:
                 "answer": answer,
                 "total_seconds": total_time,
                 "stopped": "nothing_to_filter",
+                "decision_recovered": decision_recovered,
+                "decision_error": decision_error,
             }
 
         code_plausible = sql_answer(
@@ -444,6 +463,8 @@ class HealthcarePricingPipeline:
             "answer": answer,
             "reasoning": reasoning,
             "total_seconds": total_time,
+            "decision_recovered": decision_recovered,
+            "decision_error": decision_error,
         }
 
 

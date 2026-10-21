@@ -123,6 +123,8 @@ def test_pipeline_returns_expected_keys_and_filters_prices():
         "answer",
         "reasoning",
         "total_seconds",
+        "decision_recovered",
+        "decision_error",
     }
     assert result["output"]["cpt_list"] == ["77065"]
     assert result["output"]["hcpcs_list"] == ["G0206"]
@@ -311,3 +313,56 @@ def test_orchestration_free_function_matches_notebook_api():
     )
 
     assert result["output"]["cpt_list"] == ["77065"]
+
+
+# ---------------------------------------------------------------------------
+# A decision step that never emits JSON (the truncation traceback)
+# ---------------------------------------------------------------------------
+TRUNCATED_THOUGHT = """<unused94>thought
+The user wants me to select billing codes for "colonoscpoy".
+
+1. **Analyze the procedure:** "colonoscpoy" seems like a typo for "colonoscopy".
+2. **Identify relevant CPT codes:**
+    * 77065: Diagnostic mammography
+    * 76090: Mammography; unilateral
+    * 45378: Colonoscopy, flexible; diagnostic
+    * 45367: Colonoscopy, fiberoptic
+    * 4537"""
+
+
+class TruncatingEngine(FakeEngine):
+    """Thinks until the budget runs out and never reaches the JSON."""
+
+    def decide(self, categorization, user_query):
+        return TRUNCATED_THOUGHT
+
+
+def test_pipeline_survives_a_truncated_decision():
+    """One unusable generation must not take the request with it."""
+    pipeline, _, _ = make_pipeline({"use_codes": "none", "cpt_list": [], "hcpcs_list": []})
+    pipeline.engine = TruncatingEngine(
+        {"medical": ["colonoscopy"], "hospital": [], "insurer": [], "medication": []}, {})
+
+    result = pipeline.run("colonoscpoy", verbose=False)
+
+    assert result["decision_recovered"] is True
+    assert result["decision_error"]
+    # only what retrieval offered survives: 45378 and 45367 were not candidates
+    assert result["output"]["cpt_list"] == ["77065", "76090"]
+    assert result["output"]["use_codes"] == "cpt"
+
+
+def test_pipeline_reports_an_unrecoverable_decision():
+    """Nothing recovered: an empty decision, still no exception."""
+    pipeline, _, _ = make_pipeline({"use_codes": "none", "cpt_list": [], "hcpcs_list": []})
+    engine = TruncatingEngine(
+        {"medical": ["colonoscopy"], "hospital": [], "insurer": [], "medication": []}, {})
+    engine.decide = lambda categorization, user_query: "<unused94>thought\nno idea<unused95>"
+    pipeline.engine = engine
+
+    result = pipeline.run("colonoscpoy", verbose=False)
+
+    assert result["decision_recovered"] is False
+    assert result["decision_error"]
+    assert result["output"]["cpt_list"] == []
+    assert result["output"]["hcpcs_list"] == []
