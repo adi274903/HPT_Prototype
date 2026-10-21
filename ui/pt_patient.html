@@ -433,9 +433,13 @@ a { color: var(--accent); }
 
 .ptab {
   flex: 1;
+  min-width: 0;
   font: inherit;
   font-size: 12px;
-  padding: 6px 8px;
+  padding: 6px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   border: 0;
   border-radius: var(--r-sm);
   background: none;
