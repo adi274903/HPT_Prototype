@@ -1,5 +1,7 @@
 -r requirements.txt
 pytest>=8.0
+# eval/ reads the 2.4 GB MRF through duckdb rather than pandas.
+duckdb>=1.0
 # The config tests exercise .env loading, so the suite needs the loader even
 # though the runtime copes without it.
 python-dotenv>=1.0
