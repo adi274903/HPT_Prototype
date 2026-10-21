@@ -298,3 +298,38 @@ def test_vllm_in_process_client_never_touches_a_server(monkeypatch):
     assert calls["chat"]["messages"] == [{"role": "user", "content": "how much is 77065?"}]
     assert calls["chat"]["sampling_params"].temperature == 0.0
     assert not hasattr(client, "base_url"), "in-process means there is no endpoint"
+
+
+def test_evaluate_can_reuse_the_ui_model(monkeypatch):
+    """``client=VLLMInProcessClient(llm=shared)`` must not load a second copy."""
+    import sys
+    import types
+
+    from pt_healthcare.eval_runner import VLLMInProcessClient
+
+    built = []
+
+    class LLM:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+
+        def chat(self, **kwargs):
+            class Output:
+                text, token_ids = "x", [1]
+            class Completion_:
+                prompt_token_ids, outputs = [1, 2], [Output()]
+            return [Completion_()]
+
+    module = types.ModuleType("vllm")
+    module.LLM = LLM
+    module.SamplingParams = lambda **kwargs: type("Params", (), kwargs)()
+    monkeypatch.setitem(sys.modules, "vllm", module)
+
+    shared = LLM(model="already-loaded")
+    built.clear()  # the fixture above has built exactly one, and only one is wanted
+    client = VLLMInProcessClient(llm=shared)
+    completion = client.complete("hi")
+
+    assert client.llm is shared
+    assert built == [], "the shared instance is the only one"
+    assert completion.text == "x"

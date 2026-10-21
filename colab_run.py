@@ -83,10 +83,8 @@ from pt_healthcare.data import (  # noqa: E402
 )
 from pt_healthcare.llm import MedGemmaEngine  # noqa: E402
 from pt_healthcare.models import load_models  # noqa: E402
-from pt_healthcare.orchestrator import Orchestrator  # noqa: E402
 from pt_healthcare.pipeline import HealthcarePricingPipeline  # noqa: E402
 from pt_healthcare.retrieval import CodeRetriever  # noqa: E402
-from pt_healthcare.tools import ExplainTool, LookupTool, PriceTool  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Colab defaults — exactly the paths the original notebook used
@@ -396,6 +394,7 @@ def build_pipeline(
     login: bool = True,
     token: Optional[str] = None,
     install: Optional[bool] = None,
+    pipe: Optional[Any] = None,
 ) -> HealthcarePricingPipeline:
     """Load models + data and return a ready-to-run pipeline.
 
@@ -415,7 +414,7 @@ def build_pipeline(
     if login:
         login_huggingface(token or hf_token())
 
-    pipe, embed_model = load_models(device=device)
+    pipe, embed_model = load_models(device=device, pipe=pipe)
 
     client = get_qdrant_client(resolve_qdrant_path(qdrant_path))
     mrf_data = load_mrf_data(resolve_mrf_csv(mrf_csv))
@@ -430,52 +429,6 @@ def build_pipeline(
     )
 
 
-def build_orchestrator(
-    pipeline: Optional[HealthcarePricingPipeline] = None,
-    **kwargs,
-) -> Orchestrator:
-    """Wire the tools into an orchestrator, reusing ``build_pipeline``'s handles.
-
-    Three tools, one per kind of question:
-
-    - ``price``   — the patient asks what something costs. The 7-step
-      orchestration is this tool's body, unchanged.
-    - ``lookup``  — the patient names a CPT/HCPCS code. The descriptor is fetched
-      exactly from the code index; a code the index does not hold is reported as
-      absent rather than described from memory.
-    - ``explain`` — a general question about a procedure, with no code named.
-      Answered straight from MedGemma with no retrieval.
-
-    Routing is ``pt_healthcare.router``: rules first, and the model only to break
-    a tie when the wording gives no cue. Events are emitted as each stage produces
-    data, which is what lets a UI fill a block without waiting for the run to
-    finish::
-
-        orchestrator = colab_run.build_orchestrator()
-
-        stream = pt_healthcare.events.EventStream(sink=print)
-        run = orchestrator.run("what is CPT 45378?", stream=stream)
-        print(run["answer"])
-
-    Pass ``pipeline`` to reuse one you already built instead of loading the models
-    again. Any other keyword goes to :func:`build_pipeline`.
-    """
-    pipeline = pipeline or build_pipeline(**kwargs)
-
-    return Orchestrator(
-        tools=[
-            PriceTool(pipeline),
-            LookupTool(pipeline.retriever, pipeline.engine),
-            ExplainTool(pipeline.engine),
-        ],
-        engine=pipeline.engine,
-        # The price tool announces itself through the pipeline's own logs, but
-        # lookup and explain print nothing. Without this you cannot tell from a
-        # Colab log whether routing ran, or which tool it chose.
-        printer=print,
-    )
-
-
 def setup(
     install: Optional[bool] = None,
     mount: bool = True,
@@ -487,6 +440,7 @@ def setup(
     token: Optional[str] = None,
     env_file: Optional[str] = None,
     verbose: bool = True,
+    pipe: Optional[Any] = None,
 ) -> HealthcarePricingPipeline:
     """One-call Colab bootstrap: install deps, mount Drive, stage the DB, wire models.
 
@@ -494,6 +448,12 @@ def setup(
 
         pipeline = setup()
         pipeline.run("...")
+
+    ``pipe`` is an already-built generator (``VLLMPipe``, ``LlamaCppPipe``, …).
+    Pass one to share a single set of weights with the eval::
+
+        gateway = VLLMPipe("google/medgemma-1.5-4b-it")
+        pipeline = setup(mount=False, stage=False, pipe=gateway)
 
     ``env_file`` points at a specific ``.env``; otherwise the working directory,
     ``/content`` and the repo root are searched, and any ``PT_*`` value found
@@ -529,6 +489,7 @@ def setup(
         top_k=top_k,
         token=token,
         install=False,  # already ensured above
+        pipe=pipe,
     )
 
 
