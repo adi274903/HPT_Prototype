@@ -6,7 +6,6 @@ from pt_healthcare.vocabulary import (
     column_vocabulary,
     drop_placeholders,
     resolve_to_vocabulary,
-    vocabulary_block,
 )
 
 PAYERS = ["Aetna", "Highmark BCBS of PA", "Multiplan", "UPMC Health Plan"]
@@ -96,8 +95,27 @@ def test_resolve_snaps_a_near_miss_onto_the_real_entry():
     assert resolve_to_vocabulary(["Highmark Plan"], PAYERS) == ["Highmark BCBS of PA"]
 
 
+def test_resolve_leaves_a_term_shared_by_several_entries_alone():
+    """An abbreviation matching two facilities is not the fuzzy pass's to decide.
+
+    Regression, found by probing rather than by a test: "UPMC Presby" against
+    "Upmc Presbyterian Shadyside" and "Upmc Presbyterian South" substring-matched
+    both, fell through to the fuzzy pass, and that returned *South* — the shorter
+    string, because SequenceMatcher's ratio penalises length. A wrong facility
+    filter reports another hospital's prices as the user's.
+    """
+    two = ["Upmc Presbyterian Shadyside", "Upmc Presbyterian South"]
+
+    assert resolve_to_vocabulary(["UPMC Presby"], two) == ["UPMC Presby"]
+
+
 def test_resolve_leaves_genuinely_ambiguous_terms_alone():
-    """Guessing between two UPMC payers is worse than reporting what we got."""
+    """Guessing between two UPMC payers is worse than reporting what we got.
+
+    Note this used to pass by luck: "upmc" substring-matches both entries, the
+    fuzzy pass scored 0.42 against the cutoff of 0.6, and the term survived for the
+    wrong reason. It now survives because the ambiguity rule catches it first.
+    """
     payers = ["UPMC Health Plan", "UPMC Work Partners"]
 
     assert resolve_to_vocabulary(["UPMC"], payers) == ["UPMC"]
@@ -113,25 +131,14 @@ def test_resolve_dedupes_after_snapping():
     ]
 
 
-def test_vocabulary_block_is_empty_without_known_values():
-    """No MRF loaded means the prompt stays exactly the prototype's."""
-    assert vocabulary_block() == ""
-    assert vocabulary_block([], []) == ""
+def test_vocabulary_block_is_gone():
+    """The prompt no longer carries the hospital and payer list.
 
+    Keeping it out is the point: it was ~280 tokens, the deterministic resolver
+    already maps near misses onto real entries, and the two-listed/two-unlisted
+    split is what made the model return an empty medical category.
+    """
+    from pt_healthcare import vocabulary
 
-def test_vocabulary_block_lists_both_sides():
-    block = vocabulary_block(["Upmc Altoona"], ["Aetna"])
-
-    assert "hospitals (1):" in block
-    assert "- Upmc Altoona" in block
-    assert "insurers (1):" in block
-    assert "- Aetna" in block
-    # The instruction that stops the model dumping the whole list back.
-    assert "Never return the list itself" in block
-
-
-def test_vocabulary_block_omits_an_empty_side():
-    block = vocabulary_block([], ["Aetna"])
-
-    assert "insurers (1):" in block
-    assert "hospitals" not in block
+    assert not hasattr(vocabulary, "vocabulary_block")
+    assert hasattr(vocabulary, "resolve_to_vocabulary")

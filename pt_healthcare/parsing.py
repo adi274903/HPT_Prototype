@@ -12,30 +12,58 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import config
 
-__all__ = ["parse_json_output", "compact_candidates", "strip_thought"]
+__all__ = ["parse_json_output", "compact_candidates", "split_reasoning"]
 
-#: MedGemma closes its reasoning trace with this token; everything before it is
-#: deliberation rather than output.
-_THOUGHT_END = "<unused95>"
+_THOUGHT_OPEN = re.compile(r"<unused94>", re.IGNORECASE)
+_THOUGHT_CLOSE = re.compile(r"<unused95>", re.IGNORECASE)
+_ANY_CONTROL = re.compile(r"</?unused\d+>", re.IGNORECASE)
 
 
-def strip_thought(raw_output: Any) -> str:
-    """Return only what the model said *after* its reasoning trace.
+def _tidy(text: str) -> str:
+    text = text.replace("\r\n", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
-    MedGemma opens its turn with ``<unused94>thought … <unused95>``. The thought
-    block discusses the very options it is choosing between, so keyword matching
-    against the whole response matches the *reasoning* and finds the options that
-    were rejected — which is how "What is diagnostic mammography?" once reached
-    the price path: the model wrote "not its price" while thinking.
 
-    Falls back to stripping the control tokens when no end marker is present.
+def split_reasoning(raw_output: Any) -> tuple[str, str]:
+    """Divide a MedGemma answer into ``(reasoning, answer)``.
+
+    MedGemma opens its scratchpad with ``<unused94>thought`` and closes it with
+    ``<unused95>``. Both the tokens and the text between them are reasoning,
+    not an answer: read by a patient it sounds like the tool talking to itself.
+    The reasoning is kept so the UI can show it in a "Thinking" tab; the answer
+    never contains it.
+
+    Either side may be empty. An unclosed reasoning block means generation
+    stopped before an answer existed, so the answer comes back empty rather
+    than half a thought.
     """
-    text = str(raw_output or "")
+    if raw_output is None:
+        return "", ""
+    if not isinstance(raw_output, str):
+        return "", str(raw_output)
 
-    if _THOUGHT_END in text:
-        return text.split(_THOUGHT_END, 1)[1].strip()
+    text = raw_output
+    opener = _THOUGHT_OPEN.search(text)
 
-    return re.sub(r"<unused\d+>", "", text).strip()
+    if opener:
+        tail = text[opener.end() :]
+        closer = _THOUGHT_CLOSE.search(tail)
+        if closer:
+            reasoning = tail[: closer.start()]
+            answer = tail[closer.end() :]
+        else:
+            reasoning, answer = tail, ""
+        # The sentinel word itself is not reasoning.
+        reasoning = re.sub(r"^\s*thought\b", "", reasoning, flags=re.IGNORECASE)
+        return _tidy(reasoning), _tidy(answer)
+
+    closer = _THOUGHT_CLOSE.search(text)
+    if closer:
+        # Some templates consume the opener before we see the text.
+        return _tidy(text[: closer.start()]), _tidy(text[closer.end() :])
+
+    return "", _tidy(_ANY_CONTROL.sub("", text))
 
 
 def parse_json_output(raw_output: Any) -> Dict[str, Any]:

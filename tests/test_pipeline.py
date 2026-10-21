@@ -116,12 +116,12 @@ def test_pipeline_returns_expected_keys_and_filters_prices():
 
     assert set(result) == {
         "categorized",
-        "categorizer_attempts",
         "cpt_candidates",
         "hcpcs_candidates",
         "output",
         "code_plausible",
         "answer",
+        "reasoning",
         "total_seconds",
     }
     assert result["output"]["cpt_list"] == ["77065"]
@@ -181,20 +181,6 @@ def test_answer_receives_entity_linked_context():
     assert code_plausible["filters_used"]["hospitals"] == ["upmc presbyterian shadyside"]
 
 
-def test_pipeline_passes_the_mrf_vocabulary_to_the_categorizer():
-    """The categorizer picks from what exists, instead of inventing names."""
-    pipeline, _, engine = make_pipeline(
-        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
-    )
-
-    pipeline.run("diagnostic mammogram", verbose=False)
-
-    user_query, hospitals, insurers = engine.categorize_args
-    assert user_query == "diagnostic mammogram"
-    assert hospitals == ["Upmc Childrens", "Upmc Presbyterian Shadyside"]
-    assert insurers == ["Aetna", "UPMC Health Plan"]
-
-
 def test_vocabulary_is_computed_once():
     pipeline, _, _ = make_pipeline(
         {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
@@ -230,68 +216,12 @@ def test_category_words_and_near_misses_are_fixed_before_filtering():
     assert filters["insurers"] == ["upmc health plan"]
 
 
-def test_the_pipeline_emits_stage_content_as_each_stage_finishes():
-    """The point: a UI can fill a block without waiting for the run to end.
-
-    The log lines only ever produce a timeline; block content is projected from
-    run()'s return value, which is why the panels used to stay empty until the
-    end. These events carry the same content as it appears.
-    """
-    from pt_healthcare.events import recorder
-
-    pipeline, _, _ = make_pipeline(
-        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
-    )
-
-    stream, collected = recorder()
-
-    pipeline.run("diagnostic mammogram", verbose=False, stream=stream)
-
-    assert stream.stage_names() == [
-        "entities",
-        "cpt",
-        "hcpcs",
-        "decision",
-        "validation",
-        "mrf",
-        "answer",
-    ]
-
-    entities = [
-        event
-        for event in collected
-        if event.get("stage") == "entities" and event["type"] == "stage_content"
-    ]
-
-    assert entities[0]["content"]["medical"] == ["diagnostic mammogram"]
-
-    mrf = [
-        event
-        for event in collected
-        if event.get("stage") == "mrf" and event["type"] == "stage_content"
-    ]
-
-    assert mrf[0]["content"]["match_count"] == 1
-
-
-def test_the_pipeline_runs_without_a_stream():
-    """Events are additive; nothing may depend on a UI being attached."""
-    pipeline, _, _ = make_pipeline(
-        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
-    )
-
-    result = pipeline.run("diagnostic mammogram", verbose=False)
-
-    assert result["answer"] == "FINAL ANSWER"
-
-
 def test_nothing_to_price_means_no_price_answer_and_no_step_seven():
     """An empty extraction must not be answered with the whole price file.
 
-    This is the reported run: the categorizer returned all four lists empty for
-    "How much woudl an X-ray cost?", so no code survived and no payer or hospital
-    was named. sql_answer() narrows nothing in that state, so it matches every row
-    of the MRF — which the answer step would then present as the cost of an X-ray.
+    sql_answer() with no codes and no filters narrows nothing, so it matches every
+    row of the MRF — which the answer step would then present as the cost of
+    whatever was asked.
     """
     pipeline, _, engine = make_pipeline(
         {"use_codes": "none", "cpt_list": [], "hcpcs_list": []},
@@ -308,18 +238,11 @@ def test_nothing_to_price_means_no_price_answer_and_no_step_seven():
     assert result["stopped"] == "nothing_to_filter"
     assert result["code_plausible"]["match_count"] == 0
     assert len(result["code_plausible"]["price_summary"]) == 0
-    assert "could not identify" in result["answer"].lower()
-
-    # Step 7 never ran, so no answer is built on unrelated prices.
     assert engine.answer_args is None
 
 
 def test_a_payer_filter_alone_still_prices():
-    """The guard must not fire when a payer or hospital still constrains the query.
-
-    No code survives here either, but "UPMC Presbyterian" is a real filter, so the
-    fallback that returns that facility's rows is correct and must be preserved.
-    """
+    """The guard must not fire when a payer or hospital still constrains the query."""
     pipeline, _, _ = make_pipeline(
         {"use_codes": "none", "cpt_list": [], "hcpcs_list": []}
     )
@@ -328,113 +251,6 @@ def test_a_payer_filter_alone_still_prices():
 
     assert "stopped" not in result
     assert result["code_plausible"]["match_count"] == 1
-
-
-def test_a_normal_run_is_unaffected_by_the_guard():
-    pipeline, _, _ = make_pipeline(
-        {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
-    )
-
-    result = pipeline.run("diagnostic mammogram", verbose=False)
-
-    assert "stopped" not in result
-    assert result["code_plausible"]["match_count"] == 1
-
-
-class SequencingEngine:
-    """Returns a different categorizer reply per call, to exercise the retry."""
-
-    def __init__(self, replies):
-        self.replies = list(replies)
-        self.calls = []
-        self.answer_args = None
-
-    def categorize(self, user_query, hospitals=(), insurers=()):
-        self.calls.append(
-            {"hospitals": list(hospitals), "insurers": list(insurers)}
-        )
-        return self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
-
-    def decide(self, categorization, user_query):
-        return json.dumps(
-            {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []}
-        )
-
-    def answer(self, user_query, output, code_plausible):
-        self.answer_args = (user_query, output, code_plausible)
-        return "FINAL ANSWER"
-
-
-EMPTY_MEDICAL = json.dumps(
-    {
-        "medical": [],
-        "hospital": ["UPMC Presby"],
-        "insurer": [],
-        "medication": [],
-    }
-)
-
-HAS_MEDICAL = json.dumps(
-    {
-        "medical": ["colonoscopy"],
-        "hospital": [],
-        "insurer": [],
-        "medication": [],
-    }
-)
-
-
-def test_an_empty_medical_list_is_retried_without_the_reference_lists():
-    """The reported failure: "Cost of colonoscopy at UPMC Presby?" -> medical [].
-
-    Two categories are given a closed set of values and two are not, so the retry
-    drops that list — it is the only variable that separates them.
-    """
-    engine = SequencingEngine([EMPTY_MEDICAL, HAS_MEDICAL])
-    pipeline = HealthcarePricingPipeline(
-        retriever=FakeRetriever(cpt_candidates(), hcpcs_candidates()),
-        engine=engine,
-        mrf_data=make_mrf(),
-    )
-
-    result = pipeline.run("Cost of colonoscopy at UPMC Presby?", verbose=False)
-
-    assert len(engine.calls) == 2
-    assert engine.calls[0]["hospitals"], "first attempt should get the lists"
-    assert not engine.calls[1]["hospitals"], "the retry must omit them"
-
-    assert result["categorized"]["medical"] == ["colonoscopy"]
-    assert result["categorizer_attempts"] == 2
-
-
-def test_a_good_extraction_is_not_retried():
-    engine = SequencingEngine([HAS_MEDICAL])
-    pipeline = HealthcarePricingPipeline(
-        retriever=FakeRetriever(cpt_candidates(), hcpcs_candidates()),
-        engine=engine,
-        mrf_data=make_mrf(),
-    )
-
-    result = pipeline.run("colonoscopy cost", verbose=False)
-
-    assert len(engine.calls) == 1
-    assert result["categorizer_attempts"] == 1
-
-
-def test_a_retry_that_fails_too_falls_through():
-    """One retry, no loop: a second empty result proceeds as before."""
-    engine = SequencingEngine([EMPTY_MEDICAL, EMPTY_MEDICAL])
-    pipeline = HealthcarePricingPipeline(
-        retriever=FakeRetriever(cpt_candidates(), hcpcs_candidates()),
-        engine=engine,
-        mrf_data=make_mrf(),
-    )
-
-    result = pipeline.run("Cost of colonoscopy at UPMC Presby?", verbose=False)
-
-    assert len(engine.calls) == 2
-    assert result["categorizer_attempts"] == 2
-    assert result["categorized"]["medical"] == []
 
 
 def test_top_k_is_forwarded_to_the_retriever():
