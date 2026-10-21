@@ -333,3 +333,37 @@ def test_evaluate_can_reuse_the_ui_model(monkeypatch):
     assert client.llm is shared
     assert built == [], "the shared instance is the only one"
     assert completion.text == "x"
+
+
+def test_targets_are_found_beside_the_cases_or_in_the_sibling(tmp_path):
+    """A checkout with cases in eval_dataset/ and keys in eval/ must still score."""
+    import json
+
+    from pt_healthcare.eval_runner import CASES_FILE, TARGETS_FILE, find_targets
+
+    (tmp_path / "eval_dataset").mkdir()
+    (tmp_path / "eval").mkdir()
+    case = {"eval_id": "x1", "eval_query": "q"}
+    (tmp_path / "eval_dataset" / CASES_FILE).write_text(json.dumps(case) + "\n")
+    (tmp_path / "eval" / TARGETS_FILE).write_text(json.dumps({"eval_id": "x1"}) + "\n")
+
+    assert find_targets(tmp_path / "eval_dataset") == tmp_path / "eval" / TARGETS_FILE
+
+
+def test_a_missing_answer_key_names_every_place_it_looked(tmp_path):
+    import json
+
+    import pytest
+
+    from pt_healthcare.eval_runner import CASES_FILE, find_targets
+
+    (tmp_path / "eval_dataset").mkdir()
+    (tmp_path / "eval_dataset" / CASES_FILE).write_text(json.dumps({"eval_id": "x1"}) + "\n")
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        find_targets(tmp_path / "eval_dataset")
+
+    message = str(excinfo.value)
+    assert "pt_eval_v2_targets.jsonl" in message
+    assert "1 cases" in message
+    assert str(tmp_path / "eval") in message

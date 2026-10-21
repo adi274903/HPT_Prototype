@@ -6,6 +6,8 @@ codes come from the two catalog CSVs the MedTE embedder was trained on, and the 
 are re-derived from the exact hospital / payer / plan that the sentence names.
 
 - `pt_eval_v2.jsonl` — 600 cases, one JSON object per line
+- `pt_eval_v2_targets.jsonl` — the answer key for the same 600 ids: intent, codes,
+  entity spans, MRF row ids, negotiated rate
 - `pt_eval_v2_meta.jsonl` — the same 600 ids, with the provenance behind each key
   (rate, cash price, C1 ranking, persona, which field was withheld, …)
 
