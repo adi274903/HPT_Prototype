@@ -7,9 +7,10 @@ The prototype answers patient questions about **what a medical service might
 cost**, by combining:
 
 1. **Entity extraction** — MedGemma classifies a free-text query into
-   `medical` / `hospital` / `insurer` / `medication` entities. The hospital and
-   payer names are chosen from the values that actually exist in the MRF (see
-   [Closed vocabulary](#closed-vocabulary-for-the-categorizer)), not invented.
+   `medical` / `hospital` / `insurer` / `medication` entities. The model emits the
+   query's own wording; `resolve_to_vocabulary()` then snaps a near miss onto the
+   real value in the MRF (see [Why the categorizer prompt is
+   short](#why-the-categorizer-prompt-is-short)).
 2. **Semantic code retrieval** — a MedTE sentence embedder searches two Qdrant
    collections (`cpt_medte`, `hcpcs_medte`) for candidate **CPT** / **HCPCS** codes.
 3. **Code decision** — MedGemma picks a small, plausible subset of the retrieved codes.
@@ -19,6 +20,21 @@ cost**, by combining:
    hospital **MRF** (machine-readable file) DataFrame.
 6. **Answer generation** — MedGemma writes a patient-friendly, non-committal answer
    grounded in the matched price rows.
+
+## What it looks like
+
+![The patient page: a grounded answer beside its evidence pane](docs/patient-page.png)
+
+A real run of `Cost of colonoscopy at UPMC Presby?`. The answer names the procedure
+and the code it was priced on, gives the gross and discounted-cash figures, and
+cites the rows behind each number. The evidence pane lists the 39 matching MRF
+records — 19 of them with a negotiated rate — across every payer in the file, with
+methodology attached and a click-to-resort header.
+
+Two things worth pointing at. The answer is **grounded**: every figure traces to a
+published row. And it is deliberately **non-committal** about what the patient will
+actually pay, because that depends on the specific plan rather than on the range of
+rates in the file.
 
 ## Repository layout
 
@@ -35,13 +51,10 @@ PT_Healthcare/
 │   ├── retrieval.py          # CodeRetriever: embed + Qdrant search
 │   ├── pricing.py            # sql_answer(): filter the MRF DataFrame
 │   ├── pipeline.py           # HealthcarePricingPipeline: the 7-step orchestration
-│   ├── router.py             # intent analysis: which tool fits this query
-│   ├── tools.py              # PriceTool / LookupTool
-│   ├── orchestrator.py       # classify -> dispatch -> report
-│   ├── events.py             # the structured event stream
 │   └── cli.py                # command-line entry point
 ├── colab_run.py              # Colab runner: pip/drive/tar glue + UI serving + tunnel
 ├── ui/                       # TypeScript front end (2 pages) + pt_serve.py server
+├── docs/patient-page.png     # the screenshot above
 ├── scripts/download_db.sh    # fetch + extract the Qdrant snapshot
 ├── examples/run_pipeline.py  # minimal end-to-end example
 ├── tests/                    # pytest suite for every pure component
@@ -178,6 +191,40 @@ the HF token from the environment, a `.env`, or Colab secrets
 (`HUGGINGFACE_API_KEY`). Every path can be overridden — see
 `python colab_run.py --help`.
 
+## Faster inference backend
+
+The notebook's default path loads 8 GB of bfloat16 weights and runs a 4B model
+through `transformers.generate`. Point `PT_LLM_BASE_URL` at an OpenAI-compatible
+server and `load_models()` returns a shim instead — same call shape, same prompts,
+no weights in the notebook:
+
+```python
+from pt_healthcare.backend import start_vllm, use
+use(start_vllm("google/medgemma-1.5-4b-it"))   # !pip install -q vllm first
+pipeline = colab_run.setup(mount=False, stage=False)
+```
+
+vLLM is the Colab route (one install, paged KV cache, CUDA graphs). On a smaller
+card — or with no GPU at all — use llama.cpp and a quantised GGUF:
+
+```python
+from pt_healthcare.backend import start_llama_server, use
+use(start_llama_server("/content/models/medgemma-1.5-4b-it-Q4_K_M.gguf",
+                       llama_server="/content/llama.cpp/build/bin/llama-server",
+                       n_gpu_layers=99))
+```
+
+`start_*` blocks until the server answers `/v1/models` and reports the log tail if
+it does not come up; `stop()` shuts down whatever it started. Any server that
+speaks `/v1/chat/completions` works (vLLM, llama-server, TGI, Ollama, LM Studio).
+Leaving `PT_LLM_BASE_URL` unset keeps the transformers path unchanged.
+
+Measured on MedGemma 1.5 4B Q8_0 under `llama-server`, CPU only (16 threads, no
+GPU): the categorizer answers in 14–50 s depending on how much `<unused94>thought`
+it spends, at ~4.5 tok/s generation. A GPU turns that into a couple of seconds.
+The shim is covered by `tests/test_api_pipe.py` (12 cases, fake server) and was
+run end-to-end against the real GGUF.
+
 ## Run
 
 ```bash
@@ -257,156 +304,59 @@ one payload contract regardless of transport.
 Verified against the front-end's own suite (259 checks) with both the polling
 server and its mock backend.
 
-## Three tools, one orchestrator
+### Why the categorizer prompt is short
 
-A patient query is routed to a tool, and each tool owns one kind of answer.
+Step 1 is open-ended NER, which is why it misbehaves on real queries. Two bugs came
+straight from the prototype:
 
-| tool | question it answers | body |
-|---|---|---|
-| `price` | "what might a mammogram cost at UPMC with Highmark?" | `HealthcarePricingPipeline` — the 7-step orchestration, **unchanged** |
-| `lookup` | "what is CPT 45378?" | exact descriptor fetch from the code index, then an answer grounded in it |
-| `explain` | "explain diagnostic mammography" | MedGemma directly, **no retrieval** |
+- a rule that *asked* for placeholders — `Include generic references such as "my
+  hospital" and "my insurance" if present` — so `"hospital"` came back as an entity;
+- an example, `Query: How much would Houston Hospital cost me for colonsocopy?` →
+  `"hospital": ["Houston Hospital"]`, which teaches that a token ending in
+  "Hospital" is a facility. "What hospital should I go to" pattern-matches straight
+  into it.
 
-`lookup` is the only path that touches the index, and only when the query actually
-named a code — a payload-filtered point fetch, not a semantic search, so you get
-*that* code's definition rather than its nearest neighbours. A code the index does
-not hold is reported as absent rather than described from memory: this store is
-missing roughly a third of its HCPCS codes, and CPT is reissued every January.
+Both are gone, replaced by the opposite rule and an example where a query asking
+*which* hospital returns an empty list.
 
-`explain` deliberately retrieves nothing. MedGemma is a clinical model and knows
-what a diagnostic mammogram is; a question with no code in it has nothing in the
-index to ground against, so a search would only add latency. Skipping it also
-removes a failure mode: embedding a conversational question ("can you explain me
-what is diagnostic mammography") yields a far worse query vector than embedding an
-extracted term, and the price path never embeds raw text for exactly that reason.
+The next attempt was to hand the model the real names — the distinct `hospital_name`
+/ `payer_name` values from the MRF, listed inline so extraction became slot-filling.
+That was a mistake, and it cost two things:
 
-### Routing is rules first, the model second
+- **about 280 tokens** of names in a prompt that had grown to 4806 characters and
+  153 lines. "Cost of colonoscopy at UPMC Presby?" came back with `medical: []` —
+  the procedure, the single most obvious entity in the query, dropped;
+- **a structural trap**: two categories held an enumerated list and two did not, so
+  the model filled the listed ones and left the unlisted one empty.
 
-`router.classify()` decides in this order:
+The prompt is now **1903 characters, 50 lines, four one-line examples**, and nothing
+in it names a hospital or a payer. A test fails if it exceeds 2200 characters or 60
+lines, so the size cannot creep back.
 
-1. **price wording** (`cost`, `how much`, `billed`, `deductible`, …) — wins even
-   when a code is present, so "how much does 45378 cost at UPMC" prices rather
-   than defines;
-2. **a bare CPT/HCPCS code** — `\d{5}`, `[A-Z]\d{4}`, `\d{4}[FT]` — routes to
-   `lookup`;
-3. **a named facility or payer** — naming your hospital or plan is a price signal
-   even without the word "cost";
-4. **nothing matched** — the model breaks the tie, and if it is missing, broken or
-   nonsensical the default is `explain`.
+Matching moved into code, where it is deterministic and visible:
 
-The model is the tie-breaker, not the router. The categorizer was silently
-sampling; putting tool selection in the model's hands would be that same bug at
-higher stakes, where a miss means a confidently wrong-shaped answer.
-
-```python
-pipeline = colab_run.setup()
-orchestrator = colab_run.build_orchestrator(pipeline)
-
-run = orchestrator.run("what is CPT 45378?")
-print(run["tool"], "->", run["answer"])
-```
-
-`build_orchestrator()` passes `print` as the orchestrator's printer, so a run
-announces its choice before doing any work:
-
-```
-[orchestrator] tool=explain (default: no price, code or facility cue)
-```
-
-That line earns its place. The price tool announces itself through the pipeline's
-own `STEP n/7` logs, but `lookup` and `explain` print nothing else — so without it
-a correctly-routed definition question produces **no log output at all**, and is
-indistinguishable from a run that never happened. `Orchestrator` is silent by
-default; only the Colab surface opts in, so a library caller gets no surprise
-stdout.
-
-### Events, so a UI can fill a block as it fills
-
-`ui/pt_serve.py` reverse-engineers the pipeline's log strings. That gives a live
-*step rail* but not live *content*: each block is projected from `run()`'s return
-value, so the panels stay empty until the run ends — even though
-`Raw categorizer output:` reached stdout at second 12 of a 200-second run.
-
-The log strings are unchanged, and the vendored UI still parses them. Alongside
-them, the pipeline and the tools emit structured events:
-
-```python
-from pt_healthcare import events
-
-stream = events.EventStream(sink=lambda e: print(e["type"], e.get("stage")))
-run = orchestrator.run("what is 77065?", stream=stream)
-```
-
-`run_started`, `stage_started`, `stage_content`, `stage_finished`, `tool_called`,
-`tool_result`, `run_finished`, `error`. Every event is recorded on the stream even
-with no sink attached, so a run stays inspectable after the fact, and a sink that
-raises is recorded and skipped rather than taking down a GPU run.
-
-### Closed vocabulary for the categorizer
-
-Step 1 is open-ended NER, which is why it misbehaves on real queries: asked
-"what hospital should I go to for my colonoscopy if I have my *Higmark BCBS*
-plan?", it spends a paragraph deciding whether to emit the literal string
-`"hospital"` as a placeholder, and it returns the user's typo (`"Higmark BCBS
-plan"`) verbatim. That name then matches nothing downstream, because the price
-filter is a case-insensitive *substring* match against `payer_name`.
-
-Two bugs in the categorizer prompt caused most of this, and both were inherited
-from the prototype:
-
-- a rule that *asked* for it — `Include generic references such as "my hospital"
-  and "my insurance" if present` — so `"hospital"` came back as an entity;
-- an example, `Query: How much would Houston Hospital cost me for colonsocopy?`
-  → `"hospital": ["Houston Hospital"]`, which teaches that a token ending in
-  "Hospital" is a facility. "What hospital should I go to" pattern-matches
-  straight into it.
-
-Both are now replaced with the opposite guidance and a worked example showing
-`"hospital": []` for a query that asks *which* hospital but names none.
-
-Because a 4B model will still normalise loosely, there are three guards:
-
-1. **The vocabulary goes into the prompt** — the distinct `hospital_name` /
-   `payer_name` values from the MRF (`pipeline.hospital_names()` /
-   `.payer_names()`, computed once and cached), so extraction is slot-filling
-   instead of free invention.
-2. **`drop_placeholders`** removes bare category words outright. `"hospital"` is
-   not a name, and as a substring match it silently selects an arbitrary slice of
-   the file or nothing at all.
-3. **`resolve_to_vocabulary`** snaps near misses onto real entries — exact match,
-   then unique substring either way (`"highmark"` → `"Highmark BCBS of PA"`,
-   `"UPMC Presbyterian"` → `"Upmc Presbyterian Shadyside"`), then one clear fuzzy
-   winner. Genuinely ambiguous terms are left alone: guessing between two UPMC
-   payers is worse than reporting what the model produced.
+- **`drop_placeholders`** removes bare category words outright. `"hospital"` is not
+  a name, and as a substring match it silently selects an arbitrary slice of the
+  file or nothing at all.
+- **`resolve_to_vocabulary`** snaps a near miss onto a real entry — exact match,
+  then a unique substring in either direction (`"UPMC Presby"` → `"Upmc
+  Presbyterian Shadyside"`, `"Higmark BCBS plan"` → `"Highmark BCBS of PA"`), then
+  one clear fuzzy winner.
+- an abbreviation shared by several entries (`"UPMC Presby"` against
+  `"...Shadyside"` and `"...South"`) is **left alone** rather than guessed. The
+  fuzzy pass must not decide it: `SequenceMatcher`'s ratio penalises length, so it
+  prefers the shorter candidate and picks the wrong facility. Left intact, the
+  substring filter matches all of them — a superset rather than a wrong single
+  choice.
 
 Every correction is logged, so you can see it happen:
 
 ```
-Insurers resolved to price-file entries: ['highmark plan'] -> ['Highmark BCBS of PA']
-Hospitals resolved to price-file entries: ['hospital'] -> []
+Hospitals resolved to price-file entries: ['UPMC Presby'] -> ['Upmc Presbyterian Shadyside']
 ```
 
-The lists are bounded (`vocabulary.DEFAULT_LIMIT`, 300) and cost little prompt
-space; with no MRF loaded the block is omitted and the prompt is byte-identical
-to the prototype's. Same shape as the code side: the decision step has always
-chosen CPT/HCPCS codes from the retrieved candidates rather than inventing them.
-
-```
-Known entries in the published price file. When the query refers to one of
-these, return the exact string from the list below — matching loosely, since a
-misspelling, an abbreviation or a partial name still refers to an entry. Do not
-invent a name, and never return the list itself: only what the query actually
-refers to.
-
-hospitals (12):
-- Upmc Altoona
-- Upmc Bedford
-...
-insurers (9):
-- Aetna
-- Highmark BCBS of PA
-...
-```
+Same shape as the code side: step 4 has always chosen CPT/HCPCS codes from the
+retrieved candidates rather than inventing them.
 
 ### Watch what the backend is doing
 

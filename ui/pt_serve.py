@@ -783,24 +783,22 @@ def build_prompt(query: str, turns: list[dict], keep: int = 2) -> str:
 
     lines = ["Earlier in this conversation:"]
     for turn in recent:
-        bits = []
+        lines.append(f'  Question: "{turn["query"]}"')
+        found = []
         if turn.get("codes"):
-            bits.append("code " + ", ".join(turn["codes"][:4]))
+            found.append("code " + ", ".join(turn["codes"][:4]))
         if turn.get("hospital"):
-            bits.append("at " + ", ".join(turn["hospital"][:2]))
-        tail = f" -> {'; '.join(bits)}" if bits else " -> nothing matched"
-        lines.append(f'- "{turn["query"]}"{tail}')
+            found.append("hospital " + ", ".join(turn["hospital"][:2]))
+        lines.append("  Established: " + ("; ".join(found) if found else "nothing matched"))
     lines.append("")
     lines.append(f'Follow-up: "{query}"')
     lines.append(
-        'If the follow-up refers back to the earlier question — "that", "it", '
-        '"the same hospital" — answer it using the procedure and hospital above. '
-        "If it is a complete question in its own right, ignore the earlier turn."
+        'Reuse every value under "Established" unless the follow-up replaces it; '
+        "a follow-up like \"that\", \"it\" or \"the same hospital\" refers to them."
     )
     lines.append(
-        "The insurer is not carried over: if the follow-up asks which plan or "
-        "insurer is cheapest, compare across insurers instead of assuming the "
-        "one from the earlier question."
+        "The insurer is not established: if the follow-up asks which plan or "
+        "insurer is cheapest, compare across insurers instead of assuming one."
     )
     return "\n".join(lines)
 

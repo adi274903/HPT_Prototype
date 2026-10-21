@@ -19,26 +19,39 @@ def load_models(
 ) -> Tuple[Any, Any]:
     """Load and return ``(medgemma_pipeline, sentence_transformer)``.
 
+    If ``PT_LLM_BASE_URL`` is set, the generator is an
+    :class:`~pt_healthcare.api_pipe.OpenAICompatPipe` pointing at that server
+    (llama.cpp, vLLM, TGI, Ollama, LM Studio) instead of an in-process
+    transformers pipeline. The embedder is still loaded locally either way —
+    retrieval has no server behind it.
+
     Parameters
     ----------
     device : str
         Device passed to the transformers pipeline, e.g. ``"cuda"`` or ``"cpu"``.
+        Ignored when a backend URL is set.
     dtype : torch.dtype | None
         Torch dtype for the generator. Defaults to ``torch.bfloat16``.
     """
-    import torch
-    from transformers import pipeline
     from sentence_transformers import SentenceTransformer
 
-    if dtype is None:
-        dtype = torch.bfloat16
+    if config.llm_base_url():
+        from .api_pipe import OpenAICompatPipe
 
-    pipe = pipeline(
-        "image-text-to-text",
-        model=config.medgemma_model_id(),
-        dtype=dtype,
-        device=device,
-    )
+        pipe: Any = OpenAICompatPipe(config.llm_base_url(), model=config.llm_model_name())
+    else:
+        import torch
+        from transformers import pipeline
+
+        if dtype is None:
+            dtype = torch.bfloat16
+
+        pipe = pipeline(
+            "image-text-to-text",
+            model=config.medgemma_model_id(),
+            dtype=dtype,
+            device=device,
+        )
 
     embed_model = SentenceTransformer(config.embedding_model_id())
 

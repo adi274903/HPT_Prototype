@@ -94,6 +94,10 @@ DEFAULT_MAX_CANDIDATES = 8
 DEFAULT_CANDIDATE_TEXT_LIMIT = 120
 DEFAULT_MAX_NEW_TOKENS = 4096
 
+#: Seconds to wait for one completion from an OpenAI-compatible server. A 4B
+#: thinking model that spends 400 tokens on <unused94>thought is slow unbatched.
+DEFAULT_LLM_TIMEOUT = 600
+
 # Hugging Face token env vars (gated models). The first one that is set wins.
 # HF_TOKEN / HUGGINGFACE_HUB_TOKEN are the names huggingface_hub reads by itself,
 # so accepting them avoids the surprise of a .env that "works" for the library
@@ -164,6 +168,28 @@ def candidate_text_limit() -> int:
 
 def max_new_tokens() -> int:
     return _get_int("PT_MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS)
+
+
+def llm_base_url() -> str:
+    """OpenAI-compatible backend, e.g. ``http://127.0.0.1:8080/v1``.
+
+    Empty means "load MedGemma in-process with transformers", the notebook path.
+    """
+    return _get("PT_LLM_BASE_URL", "").rstrip("/")
+
+
+def llm_model_name() -> str:
+    """Name the server should be serving; llama-server ignores it, vLLM checks it."""
+    return _get("PT_LLM_MODEL", medgemma_model_id())
+
+
+def llm_api_key() -> str:
+    return _get("PT_LLM_API_KEY", "")
+
+
+def llm_timeout() -> float:
+    """Seconds to wait for one completion. A 4B thinking model is slow unbatched."""
+    return float(_get_int("PT_LLM_TIMEOUT", DEFAULT_LLM_TIMEOUT))
 
 
 def hf_token_from_env() -> Optional[str]:
