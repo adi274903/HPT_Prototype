@@ -71,6 +71,28 @@ from .vocabulary import resolve_to_vocabulary
 FIELD_ORDER = ("medical", "hospital", "insurer", "medication")
 
 
+def final_answer(text: str) -> str:
+    """Drop MedGemma's ``<unused94>thought …`` scratchpad before reading figures.
+
+    Without this, a numeric-faithfulness check scores the model's private reasoning
+    as if it were the answer. The two branches of this package name the helper
+    differently, so both are tried.
+    """
+    raw = str(text or "")
+    try:
+        from .parsing import strip_thought  # published branch
+
+        return strip_thought(raw) or raw
+    except ImportError:
+        pass
+    try:
+        from .parsing import split_reasoning  # older checkout
+
+        return split_reasoning(raw)[1] or raw
+    except (ImportError, ValueError, TypeError):
+        return raw
+
+
 def safe_parse(text: str) -> Dict[str, Any]:
     """``parse_json_output`` but a malformed reply is a recorded failure, not a crash."""
     try:
@@ -250,6 +272,41 @@ class ChatClient:
         return Completion(text="", prompt_tokens=0, completion_tokens=0,
                           latency_ms=(time.perf_counter() - started) * 1000,
                           error=last_error)
+
+
+class TransformersClient:
+    """Same ``complete()`` surface, but through the package's own HF pipeline.
+
+    A fallback, not a preference: vLLM is faster and is what the harness targets,
+    but a multimodal checkpoint can fail to load there, and a run that dies at
+    startup tells you nothing about the pipeline.
+    """
+
+    def __init__(self, model_id: Optional[str] = None, device: Optional[str] = None,
+                 max_tokens: int = 512) -> None:
+        from . import config
+        from .models import load_models
+
+        self.pipe, _ = load_models(device=device)
+        self.max_tokens = max_tokens or config.max_new_tokens()
+        self.tokens_in = 0
+        self.tokens_out = 0
+
+    def complete(self, prompt: str, max_tokens: Optional[int] = None) -> Completion:
+        started = time.perf_counter()
+        try:
+            output = self.pipe(text=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                               max_new_tokens=max_tokens or self.max_tokens, do_sample=False)
+            text = output[0]["generated_text"][-1]["content"]
+            self.tokens_in += len(prompt) // 4
+            self.tokens_out += len(text) // 4
+            return Completion(text=text, prompt_tokens=len(prompt) // 4,
+                              completion_tokens=len(text) // 4,
+                              latency_ms=(time.perf_counter() - started) * 1000)
+        except Exception as exc:  # noqa: BLE001 - a failed generation is data, not a crash
+            return Completion(text="", prompt_tokens=0, completion_tokens=0,
+                              latency_ms=(time.perf_counter() - started) * 1000,
+                              error=f"{type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +543,7 @@ class Runner:
         answer = self.client.complete(build_answer_prompt(query, {"cpt_list": predicted_codes}, answer_input),
                                       max_tokens=400)
         record["latency_ms"]["answer"] = answer.latency_ms
-        text = answer.text or ""
+        text = final_answer(answer.text)
         if not text:
             record["parse_failures"].append("answer")
         record["answer"] = text
@@ -725,7 +782,8 @@ def format_report(report: Mapping[str, Any]) -> str:
         return "—" if value is None else f"{value:.3f}"
 
     lines: List[str] = []
-    lines.append(f"cases: {report['n_cases']}   model: {report['run'].get('model')}   "
+    lines.append(f"cases: {report['n_cases']}   model: {report['run'].get('model')} "
+                 f"({report['run'].get('backend')})   "
                  f"retriever: {report['run'].get('retriever')} (top_k={report['run'].get('top_k')})")
     lines.append("")
     lines.append("CODES (set overlap vs the answer key)")
@@ -808,10 +866,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--subtypes", default="", help="comma separated, e.g. A1,C1,D1")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--retrieve", default="both", choices=["both", "cpt", "hcpcs"])
+    parser.add_argument("--backend", default="vllm", choices=["vllm", "hf"],
+                        help="hf loads MedGemma in-process; vllm talks to a served endpoint")
+    parser.add_argument("--device", default=None, help="hf backend device, e.g. cuda")
     parser.add_argument("--retriever", default="lexical", choices=["lexical", "qdrant"],
                         help="lexical needs no GPU; qdrant loads MedTE and the snapshot")
     parser.add_argument("--qdrant-path", default=None)
     parser.add_argument("--out", default="eval_run.jsonl")
+    parser.add_argument("--fresh", action="store_true",
+                        help="ignore an existing --out and start over instead of resuming")
     parser.add_argument("--report", default="eval_report.json")
     args = parser.parse_args(argv)
 
@@ -824,7 +887,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     catalog = load_catalog(Path(args.catalog_dir)) if args.catalog_dir else load_catalog()
 
-    client = ChatClient(args.base_url, args.model)
+    client: Any = (TransformersClient(device=args.device) if args.backend == "hf"
+                   else ChatClient(args.base_url, args.model))
     pricer = Pricer(Path(args.db))
     if args.retriever == "qdrant":
         retriever: Any = EmbeddingRetriever(qdrant_path=args.qdrant_path, top_k=args.top_k)
@@ -850,9 +914,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.limit:
         cases = cases[:args.limit]
 
-    records: List[Dict[str, Any]] = []
-    with Path(args.out).open("w", encoding="utf-8") as handle:
+    # A 600-case run is ~2400 generations: on a rented GPU that is hours, and a
+    # Colab disconnect mid-run must not cost the whole run. Records are appended
+    # as they complete and already-scored cases are skipped on the next attempt.
+    out_path = Path(args.out)
+    previous = [] if args.fresh or not out_path.exists() else load_jsonl(out_path)
+    done = {str(record.get("eval_id")): record for record in previous if record.get("eval_id")}
+    records: List[Dict[str, Any]] = list(done.values())
+    with out_path.open("a" if done else "w", encoding="utf-8") as handle:
         for index, case in enumerate(cases, start=1):
+            if str(case["eval_id"]) in done:
+                print(f"[{index}/{len(cases)}] {case['eval_id']} cached", flush=True)
+                continue
             record = runner.run_case(case, targets[case["eval_id"]])
             records.append(record)
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -861,7 +934,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f"rows_dice={record['rows']['dice_raw']} intent={record['intent_pred']}", flush=True)
 
     report = aggregate(records, {"base_url": args.base_url, "model": args.model,
-                                 "retriever": args.retriever, "top_k": args.top_k,
+                                 "retriever": args.retriever, "backend": args.backend,
+                                 "top_k": args.top_k,
                                  "prompt_tokens": client.tokens_in, "completion_tokens": client.tokens_out})
     Path(args.report).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print()
