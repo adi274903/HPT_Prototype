@@ -936,26 +936,70 @@ def load_jsonl(path: Path) -> List[Dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+CASES_FILE = "pt_eval_v2.jsonl"
+TARGETS_FILE = "pt_eval_v2_targets.jsonl"
+
+
 def find_dataset_dir(explicit: Optional[Any] = None, root: Optional[Path] = None) -> Path:
-    """Where ``pt_eval_v2.jsonl`` lives, without making the caller guess.
+    """Where the eval set lives, without making the caller guess.
 
     The dataset sat in ``eval_dataset/`` on the harness branch and in ``eval/`` in
     the development checkout; both are searched so a notebook cell needs no path.
+
+    A directory holding the cases but not the answer keys is only returned when no
+    complete directory exists — otherwise a checkout with cases in one place and
+    keys in the other would silently score against nothing.
     """
     if explicit is not None:
         path = Path(explicit)
-        if not (path / "pt_eval_v2.jsonl").exists():
-            raise FileNotFoundError(f"{path} has no pt_eval_v2.jsonl")
+        if not (path / CASES_FILE).exists():
+            raise FileNotFoundError(f"{path} has no {CASES_FILE}")
         return path
 
     root = Path(root or Path(__file__).resolve().parent.parent)
-    for name in ("eval_dataset", "eval"):
-        candidate = root / name
-        if (candidate / "pt_eval_v2.jsonl").exists():
-            return candidate
+    candidates = [root / name for name in ("eval_dataset", "eval")]
+    complete = [
+        d for d in candidates
+        if (d / CASES_FILE).exists() and (d / TARGETS_FILE).exists()
+    ]
+    if complete:
+        return complete[0]
+    for candidate in candidates:
+        if (candidate / CASES_FILE).exists():
+            return candidate  # find_targets explains what is missing
     raise FileNotFoundError(
-        f"no pt_eval_v2.jsonl under {root}/eval_dataset or {root}/eval — "
+        f"no {CASES_FILE} under {root}/eval_dataset or {root}/eval — "
         "pass dataset=/path/to/dir")
+
+
+def find_targets(dataset_dir: Path, root: Optional[Path] = None) -> Path:
+    """The answer keys, beside the cases or in the sibling dataset directory.
+
+    Cases and keys are keyed by ``eval_id`` and are shipped in the same directory;
+    a checkout that split them across ``eval/`` and ``eval_dataset/`` still works,
+    as long as one of them has both. Raises naming every directory searched, so a
+    half-shipped dataset says which file went missing instead of a bare ENOENT.
+    """
+    dataset_dir = Path(dataset_dir)
+    root = Path(root or dataset_dir.parent)
+    searched = [dataset_dir / TARGETS_FILE]
+    if (dataset_dir / TARGETS_FILE).exists():
+        return searched[0]
+
+    for sibling in ("eval", "eval_dataset"):
+        candidate = root / sibling / TARGETS_FILE
+        if candidate == searched[0]:
+            continue
+        searched.append(candidate)
+        if candidate.exists():
+            return candidate
+
+    n_cases = sum(1 for line in (dataset_dir / CASES_FILE).read_text(encoding="utf-8").splitlines() if line.strip())
+    raise FileNotFoundError(
+        f"{TARGETS_FILE} not found ({n_cases} cases in {dataset_dir}). "
+        "Searched: " + ", ".join(str(path) for path in searched) +
+        ". The answer keys ship beside the cases; re-run git pull, or pass "
+        "dataset=/path/to/dir that contains both files.")
 
 
 def load_catalog_module():
@@ -1047,8 +1091,8 @@ def evaluate(
     flight rather than the whole run. ``fresh=True`` starts over.
     """
     dataset_dir = find_dataset_dir(dataset)
-    cases = load_jsonl(dataset_dir / "pt_eval_v2.jsonl")
-    targets = {record["eval_id"]: record for record in load_jsonl(dataset_dir / "pt_eval_v2_targets.jsonl")}
+    cases = load_jsonl(dataset_dir / CASES_FILE)
+    targets = {record["eval_id"]: record for record in load_jsonl(find_targets(dataset_dir))}
 
     wanted = {str(value).strip().upper() for value in subtypes if str(value).strip()}
     if wanted:
