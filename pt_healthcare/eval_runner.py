@@ -1014,6 +1014,71 @@ def load_catalog_module():
     return load_catalog
 
 
+def catalog_from_qdrant(qdrant_path: Optional[Any] = None) -> Dict[str, Dict[str, str]]:
+    """``{family: {code: text}}`` read out of the store the app already queries.
+
+    Every point carries ``code`` and ``text`` in its payload, so the catalog is the
+    same data the retriever returns — no CSVs to ship, and no second copy of the
+    code descriptions to drift from the index.
+    """
+    from qdrant_client import QdrantClient  # lazy: only this path needs it
+
+    from . import config as config_module
+
+    client = QdrantClient(path=str(qdrant_path or config_module.qdrant_dir()))
+    out: Dict[str, Dict[str, str]] = {}
+    try:
+        for family, collection in (
+            ("CPT", config_module.cpt_collection()),
+            ("HCPCS", config_module.hcpcs_collection()),
+        ):
+            codes: Dict[str, str] = {}
+            offset: Any = None
+            while True:
+                points, offset = client.scroll(
+                    collection_name=collection,
+                    limit=2048,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    code = str(payload.get("code", "")).strip()
+                    if code:
+                        codes[code] = str(payload.get("text", "")).strip()
+                if offset is None:
+                    break
+            out[family] = codes
+    finally:
+        client.close()
+    return out
+
+
+def resolve_catalog(
+    catalog_dir: Optional[Any] = None,
+    qdrant_path: Optional[Any] = None,
+) -> Dict[str, Dict[str, str]]:
+    """The lexical retriever's catalog: Qdrant first, the CSV files only as backup.
+
+    The CSVs were the original source of ``code -> text``, but the same pairs are
+    already payloads in the store the app queries, and Colab has no
+    ``~/Downloads/*_embed_ready.csv``. Passing ``catalog_dir`` still forces the CSVs.
+    """
+    if catalog_dir is None:
+        try:
+            catalog = catalog_from_qdrant(qdrant_path)
+            if any(catalog.values()):
+                return catalog
+            print("[eval] qdrant catalog is empty; falling back to CSV", file=sys.stderr)
+        except Exception as exc:  # missing store, missing client, unreadable
+            print(f"[eval] qdrant catalog unavailable ({exc}); falling back to CSV",
+                  file=sys.stderr)
+
+    load_catalog = load_catalog_module()
+    return load_catalog(Path(catalog_dir)) if catalog_dir else load_catalog()
+
+
 def build_client(backend: str, *, model: str, base_url: str, device: Optional[str] = None,
                  gguf: Optional[str] = None, n_gpu_layers: int = -1,
                  max_model_len: int = 8192, max_tokens: int = 512,
@@ -1121,9 +1186,7 @@ def evaluate(
         if retriever == "qdrant":
             retriever_object = EmbeddingRetriever(qdrant_path=qdrant_path, top_k=top_k)
         else:
-            load_catalog = load_catalog_module()
-            catalog = load_catalog(Path(catalog_dir)) if catalog_dir else load_catalog()
-            retriever_object = CatalogRetriever(catalog)
+            retriever_object = CatalogRetriever(resolve_catalog(catalog_dir, qdrant_path))
         if client is None:
             client = build_client(backend, model=model, base_url=base_url, device=device,
                                   gguf=gguf, n_gpu_layers=n_gpu_layers,

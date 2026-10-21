@@ -367,3 +367,39 @@ def test_a_missing_answer_key_names_every_place_it_looked(tmp_path):
     assert "pt_eval_v2_targets.jsonl" in message
     assert "1 cases" in message
     assert str(tmp_path / "eval") in message
+
+
+def test_the_catalog_comes_from_qdrant_not_the_csv(monkeypatch, tmp_path):
+    """No ~/Downloads on Colab: code -> text must come from the store already there."""
+    import sys
+    import types
+
+    from pt_healthcare import eval_runner
+
+    seen = {}
+
+    class Point:
+        def __init__(self, code, text):
+            self.payload = {"code": code, "text": text}
+
+    class Client:
+        def __init__(self, path):
+            seen["path"] = path
+
+        def scroll(self, collection_name, limit, offset, with_payload, with_vectors):
+            if collection_name == "hcpcs_medte":
+                return [Point("G0204", "Diagnostic mammography, bilateral")], None
+            return [Point("77065", "Diagnostic mammography, unilateral, including CAD")], None
+
+        def close(self):
+            seen["closed"] = True
+
+    module = types.ModuleType("qdrant_client")
+    module.QdrantClient = Client
+    monkeypatch.setitem(sys.modules, "qdrant_client", module)
+
+    catalog = eval_runner.resolve_catalog(qdrant_path=tmp_path)
+
+    assert catalog["CPT"]["77065"].startswith("Diagnostic mammography")
+    assert catalog["HCPCS"]["G0204"].startswith("Diagnostic mammography")
+    assert seen["path"] == str(tmp_path) and seen.get("closed") is True
