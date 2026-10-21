@@ -202,9 +202,62 @@ a { color: var(--accent); }
 /* The column that scrolls; the evidence pane rides alongside it. */
 .chat-col { min-width: 0; }
 
-.intro { margin-bottom: 24px; }
-.intro h1 { font-size: 26px; line-height: 1.25; margin-bottom: 8px; }
-.intro p { color: var(--muted); max-width: 62ch; font-size: 15px; }
+.intro { margin-bottom: 26px; }
+.intro h1 { font-size: 26px; line-height: 1.25; margin-bottom: 10px; letter-spacing: -0.015em; }
+.intro h2 {
+  margin: 24px 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.intro p { color: var(--muted); max-width: 64ch; font-size: 15px; line-height: 1.62; }
+.intro p + p { margin-top: 10px; }
+.intro .intro-lead { color: var(--text); }
+.intro strong { color: var(--text); font-weight: 600; }
+
+/* What we need from the patient — a card, so the three inputs read as a
+   checklist rather than a paragraph. */
+.intro-needs {
+  margin: 12px 0 16px;
+  padding: 2px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  max-width: 64ch;
+}
+.intro-need { padding: 12px 0; }
+.intro-need + .intro-need { border-top: 1px solid var(--border); }
+.intro-need dt { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 3px; }
+.intro-need dd { margin: 0; font-size: 14px; line-height: 1.55; color: var(--muted); }
+
+.intro-notes {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.intro-notes li {
+  position: relative;
+  padding-left: 18px;
+  max-width: 64ch;
+  font-size: 14px;
+  line-height: 1.58;
+  color: var(--muted);
+}
+.intro-notes li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
 
 /* ── Messages ─────────────────────────────────────────────────────────── */
 
@@ -957,7 +1010,7 @@ body.modal-open { overflow: hidden; }
 <div id="app"></div>
 <script id="pt-boot"></script>
 <script>
-"use strict";(()=>{function J(){return window.__PT_BOOT__??{}}function Se(){let e=J().apiBase;if(e&&e!=="auto")return e.replace(/\/+$/,"")||".";let a=/^(.*\/proxy\/\d+)(?:\/|$)/.exec(window.location.pathname);return a?a[1]:"."}function V(){return J().payload??null}function A(e){return`${Se()}${e}`}async function q(e=2500){let a=new AbortController,t=setTimeout(()=>a.abort(),e);try{let n=await fetch(A("/api/health"),{signal:a.signal,headers:{accept:"application/json"}});if(!n.ok)return null;let i=await n.json();return i?.ok?i:null}catch{return null}finally{clearTimeout(t)}}var Ce=700,ye=1800*1e3,Ie=new Set([404,405,501]),E=class extends Error{constructor(a="server has no /api/run"){super(a),this.name="NoPollingTransport"}};function je(e,a){return new Promise((t,n)=>{let i=setTimeout(t,e);a?.addEventListener("abort",()=>{clearTimeout(i),n(new DOMException("aborted","AbortError"))},{once:!0})})}function Z(e,a,t){let n=!1,i=!1,r=u=>{n||i||(i=!0,n=!0,a.onResult(u))},s=u=>{n||i||(i=!0,a.onError(u))},h=async u=>{let c=0,g=Date.now()+ye;for(;!n&&!i;){if(Date.now()>g)throw new Error("run timed out");let p=await fetch(A(`/api/poll?run=${encodeURIComponent(u)}&since=${c}`),{signal:t,headers:{accept:"application/json"}});if(!p.ok){let m=await p.text().catch(()=>"");throw new Error(`HTTP ${p.status} ${m.slice(0,200)}`.trim())}let o=await p.json();for(let m of o.stages??[])a.onStage?.(m);for(let m of o.lines??[])a.onLog?.(m);if(typeof o.next=="number"&&(c=o.next),o.state==="done"){r(o.result);return}if(o.state==="error"){s(o.error??"the run failed");return}await je(Ce,t)}};return(async()=>{let u;try{let c=await fetch(A("/api/run"),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({query:e}),signal:t});if(Ie.has(c.status))throw new E;if(!c.ok){let p=await c.text().catch(()=>"");throw new Error(`HTTP ${c.status} ${p.slice(0,200)}`.trim())}let g=await c.json();if(!g?.run)throw new E("server returned no run id");u=g.run}catch(c){if(n||i)return;if(c instanceof DOMException&&c.name==="AbortError"){n=!0;return}Ne(e,a,t,r,s);return}try{await h(u)}catch(c){if(n||i)return;if(c instanceof DOMException&&c.name==="AbortError"){n=!0;return}s(c instanceof Error?c.message:String(c))}})(),()=>{n=!0}}function Ne(e,a,t,n,i){let r=!1,s=!1,h=o=>{s||r||(s=!0,n(o))},u=o=>{s||r||(s=!0,i(o))},c=async()=>{if(!(r||s))try{let o=await fetch(A("/api/query"),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({query:e}),signal:t});if(!o.ok){let m=await o.text().catch(()=>"");throw new Error(`HTTP ${o.status} ${m.slice(0,300)}`)}h(await o.json())}catch(o){u(o instanceof Error?o.message:String(o))}};if(typeof EventSource>"u"){c();return}let g=null;try{g=new EventSource(A(`/api/stream?q=${encodeURIComponent(e)}`))}catch{c();return}let p=!1;g.onmessage=o=>{if(r||s)return;let m;try{m=JSON.parse(o.data)}catch{return}switch(p=!0,m.type){case"stage":a.onStage?.(m.stage);break;case"log":a.onLog?.(m.line);break;case"result":h(m.result),g?.close();break;case"error":u(m.message),g?.close();break}},g.onerror=()=>{g?.close(),g=null,!(s||r)&&(p?u("stream interrupted"):c())},t&&t.addEventListener("abort",()=>{r=!0,g?.close(),g=null})}var K=[{query:"What might a diagnostic mammogram cost at UPMC Presbyterian with UPMC Health Plan?",mode:"demo",categorized:{medical:["diagnostic mammogram"],hospital:["UPMC Presbyterian"],insurer:["UPMC Health Plan"],medication:[]},cpt_candidates:[{rank:1,score:.896429,code:"76090",text:"Mammography; unilateral"},{rank:2,score:.866981,code:"76091",text:"Mammography; bilateral"},{rank:3,score:.860501,code:"77065",text:"Diagnostic mammography, unilateral, including CAD"},{rank:4,score:.848398,code:"77066",text:"Diagnostic mammography, bilateral, including CAD"},{rank:5,score:.824852,code:"99459",text:"Pelvic examination (clinical breast examination)"},{rank:6,score:.786874,code:"77055",text:"Mammography, unilateral (including CAD), with or without 3D imaging"},{rank:7,score:.781509,code:"77061",text:"Mammography, digital breast tomosynthesis, unilateral (including CAD)"},{rank:8,score:.778584,code:"77056",text:"Mammography, bilateral (including CAD), with or without 3D imaging"},{rank:9,score:.778563,code:"77067",text:"Screening mammography, bilateral, including CAD"},{rank:10,score:.762974,code:"77063",text:"Screening mammography, digital breast tomosynthesis, bilateral"}],hcpcs_candidates:[{rank:1,score:.799653,code:"G0204",text:"Diagnostic mammography, including computer-aided detection (cad) when performed; bilateral"},{rank:2,score:.79663,code:"G0206",text:"Diagnostic mammography, including computer-aided detection (cad) when performed; unilateral"},{rank:3,score:.751306,code:"GH",text:"Diagnostic mammogram converted from screening mammogram on same day"},{rank:4,score:.725492,code:"G0202",text:"Screening mammography, bilateral (2-view study of each breast), including computer-aided detection"},{rank:5,score:.70084,code:"S8080",text:"Scintimammography (radioimmunoscintigraphy of the breast), unilateral, including supply of radiopharmaceutical"},{rank:6,score:.698585,code:"C8903",text:"Magnetic resonance imaging with contrast, breast; unilateral"},{rank:7,score:.687986,code:"C8905",text:"Magnetic resonance imaging without contrast followed by with contrast, breast; unilateral"},{rank:8,score:.668098,code:"C8906",text:"Magnetic resonance imaging with contrast, breast; bilateral"},{rank:9,score:.66304,code:"C8904",text:"Magnetic resonance imaging without contrast, breast; unilateral"},{rank:10,score:.648542,code:"G9899",text:"Screening, diagnostic, film, digital or digital breast tomosynthesis mammography reported without a final assessment"}],decision:{use_codes:"cpt",cpt_list:["77065","77066","76090","76091","77061"],hcpcs_list:[]},rejected:{cpt:[],hcpcs:[]},code_plausible:{match_count:1,filters_used:{cpt_codes:["77065","77066","76090","76091","77061"],hcpcs_codes:[],insurers:["upmc health plan"],hospitals:["upmc presbyterian"]},price_summary:[{row_id:"6772230",hospital_name:"Upmc Presbyterian Shadyside",payer_name:"UPMC Health Plan",plan_name:"Commercial",description:"MAMMO DIGITAL DX UNI WWO CAD",billing_class:"facility",setting:"outpatient",CPT:"77065",HCPCS:null,modifiers:null,"standard_charge|gross":905,"standard_charge|discounted_cash":543,"standard_charge|negotiated_dollar":228.75,median_amount:null,"10th_percentile":null,"90th_percentile":null,"standard_charge|min":58.27,"standard_charge|max":769.25,"standard_charge|methodology":"fee schedule"}],matched_rows_total:1},answer:`Based on the information provided, a diagnostic mammogram at UPMC Presbyterian with UPMC Health Plan might cost approximately $543.00 out of pocket.
+"use strict";(()=>{function q(){return window.__PT_BOOT__??{}}function Se(){let e=q().apiBase;if(e&&e!=="auto")return e.replace(/\/+$/,"")||".";let a=/^(.*\/proxy\/\d+)(?:\/|$)/.exec(window.location.pathname);return a?a[1]:"."}function J(){return q().payload??null}function A(e){return`${Se()}${e}`}async function V(e=2500){let a=new AbortController,t=setTimeout(()=>a.abort(),e);try{let n=await fetch(A("/api/health"),{signal:a.signal,headers:{accept:"application/json"}});if(!n.ok)return null;let i=await n.json();return i?.ok?i:null}catch{return null}finally{clearTimeout(t)}}var Ce=700,ye=1800*1e3,Ie=new Set([404,405,501]),E=class extends Error{constructor(a="server has no /api/run"){super(a),this.name="NoPollingTransport"}};function je(e,a){return new Promise((t,n)=>{let i=setTimeout(t,e);a?.addEventListener("abort",()=>{clearTimeout(i),n(new DOMException("aborted","AbortError"))},{once:!0})})}function Z(e,a,t){let n=!1,i=!1,r=u=>{n||i||(i=!0,n=!0,a.onResult(u))},s=u=>{n||i||(i=!0,a.onError(u))},h=async u=>{let c=0,g=Date.now()+ye;for(;!n&&!i;){if(Date.now()>g)throw new Error("run timed out");let p=await fetch(A(`/api/poll?run=${encodeURIComponent(u)}&since=${c}`),{signal:t,headers:{accept:"application/json"}});if(!p.ok){let m=await p.text().catch(()=>"");throw new Error(`HTTP ${p.status} ${m.slice(0,200)}`.trim())}let o=await p.json();for(let m of o.stages??[])a.onStage?.(m);for(let m of o.lines??[])a.onLog?.(m);if(o.partial&&a.onPartial?.(o.partial),typeof o.next=="number"&&(c=o.next),o.state==="done"){r(o.result);return}if(o.state==="error"){s(o.error??"the run failed");return}await je(Ce,t)}};return(async()=>{let u;try{let c=await fetch(A("/api/run"),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({query:e}),signal:t});if(Ie.has(c.status))throw new E;if(!c.ok){let p=await c.text().catch(()=>"");throw new Error(`HTTP ${c.status} ${p.slice(0,200)}`.trim())}let g=await c.json();if(!g?.run)throw new E("server returned no run id");u=g.run}catch(c){if(n||i)return;if(c instanceof DOMException&&c.name==="AbortError"){n=!0;return}Ne(e,a,t,r,s);return}try{await h(u)}catch(c){if(n||i)return;if(c instanceof DOMException&&c.name==="AbortError"){n=!0;return}s(c instanceof Error?c.message:String(c))}})(),()=>{n=!0}}function Ne(e,a,t,n,i){let r=!1,s=!1,h=o=>{s||r||(s=!0,n(o))},u=o=>{s||r||(s=!0,i(o))},c=async()=>{if(!(r||s))try{let o=await fetch(A("/api/query"),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({query:e}),signal:t});if(!o.ok){let m=await o.text().catch(()=>"");throw new Error(`HTTP ${o.status} ${m.slice(0,300)}`)}h(await o.json())}catch(o){u(o instanceof Error?o.message:String(o))}};if(typeof EventSource>"u"){c();return}let g=null;try{g=new EventSource(A(`/api/stream?q=${encodeURIComponent(e)}`))}catch{c();return}let p=!1;g.onmessage=o=>{if(r||s)return;let m;try{m=JSON.parse(o.data)}catch{return}switch(p=!0,m.type){case"stage":a.onStage?.(m.stage);break;case"log":a.onLog?.(m.line);break;case"partial":a.onPartial?.(m.result);break;case"result":h(m.result),g?.close();break;case"error":u(m.message),g?.close();break}},g.onerror=()=>{g?.close(),g=null,!(s||r)&&(p?u("stream interrupted"):c())},t&&t.addEventListener("abort",()=>{r=!0,g?.close(),g=null})}var K=[{query:"What might a diagnostic mammogram cost at UPMC Presbyterian with UPMC Health Plan?",mode:"demo",categorized:{medical:["diagnostic mammogram"],hospital:["UPMC Presbyterian"],insurer:["UPMC Health Plan"],medication:[]},cpt_candidates:[{rank:1,score:.896429,code:"76090",text:"Mammography; unilateral"},{rank:2,score:.866981,code:"76091",text:"Mammography; bilateral"},{rank:3,score:.860501,code:"77065",text:"Diagnostic mammography, unilateral, including CAD"},{rank:4,score:.848398,code:"77066",text:"Diagnostic mammography, bilateral, including CAD"},{rank:5,score:.824852,code:"99459",text:"Pelvic examination (clinical breast examination)"},{rank:6,score:.786874,code:"77055",text:"Mammography, unilateral (including CAD), with or without 3D imaging"},{rank:7,score:.781509,code:"77061",text:"Mammography, digital breast tomosynthesis, unilateral (including CAD)"},{rank:8,score:.778584,code:"77056",text:"Mammography, bilateral (including CAD), with or without 3D imaging"},{rank:9,score:.778563,code:"77067",text:"Screening mammography, bilateral, including CAD"},{rank:10,score:.762974,code:"77063",text:"Screening mammography, digital breast tomosynthesis, bilateral"}],hcpcs_candidates:[{rank:1,score:.799653,code:"G0204",text:"Diagnostic mammography, including computer-aided detection (cad) when performed; bilateral"},{rank:2,score:.79663,code:"G0206",text:"Diagnostic mammography, including computer-aided detection (cad) when performed; unilateral"},{rank:3,score:.751306,code:"GH",text:"Diagnostic mammogram converted from screening mammogram on same day"},{rank:4,score:.725492,code:"G0202",text:"Screening mammography, bilateral (2-view study of each breast), including computer-aided detection"},{rank:5,score:.70084,code:"S8080",text:"Scintimammography (radioimmunoscintigraphy of the breast), unilateral, including supply of radiopharmaceutical"},{rank:6,score:.698585,code:"C8903",text:"Magnetic resonance imaging with contrast, breast; unilateral"},{rank:7,score:.687986,code:"C8905",text:"Magnetic resonance imaging without contrast followed by with contrast, breast; unilateral"},{rank:8,score:.668098,code:"C8906",text:"Magnetic resonance imaging with contrast, breast; bilateral"},{rank:9,score:.66304,code:"C8904",text:"Magnetic resonance imaging without contrast, breast; unilateral"},{rank:10,score:.648542,code:"G9899",text:"Screening, diagnostic, film, digital or digital breast tomosynthesis mammography reported without a final assessment"}],decision:{use_codes:"cpt",cpt_list:["77065","77066","76090","76091","77061"],hcpcs_list:[]},rejected:{cpt:[],hcpcs:[]},code_plausible:{match_count:1,filters_used:{cpt_codes:["77065","77066","76090","76091","77061"],hcpcs_codes:[],insurers:["upmc health plan"],hospitals:["upmc presbyterian"]},price_summary:[{row_id:"6772230",hospital_name:"Upmc Presbyterian Shadyside",payer_name:"UPMC Health Plan",plan_name:"Commercial",description:"MAMMO DIGITAL DX UNI WWO CAD",billing_class:"facility",setting:"outpatient",CPT:"77065",HCPCS:null,modifiers:null,"standard_charge|gross":905,"standard_charge|discounted_cash":543,"standard_charge|negotiated_dollar":228.75,median_amount:null,"10th_percentile":null,"90th_percentile":null,"standard_charge|min":58.27,"standard_charge|max":769.25,"standard_charge|methodology":"fee schedule"}],matched_rows_total:1},answer:`Based on the information provided, a diagnostic mammogram at UPMC Presbyterian with UPMC Health Plan might cost approximately $543.00 out of pocket.
 
 This cost is based on the standard charge for the procedure, which is $905.00. The discounted cash price is $543.00.
 
@@ -1060,12 +1113,61 @@ Remember, the final cost depends on the specific services performed and the docu
   </div>
 </div></header>`}function we(){return`
 <div class="intro">
-  <h1>What will this procedure cost you?</h1>
-  <p>
-    Ask about a test, scan or procedure and where you might have it. Answers come from the
-    prices hospitals are required to publish &mdash; and every figure is linked back to the
-    record it came from, so you can check it yourself.
+  <h1>Welcome to our beta price transparency tool.</h1>
+
+  <p class="intro-lead">
+    Tell us about the procedure you&rsquo;d like an estimate for. Please include:
   </p>
+
+  <dl class="intro-needs">
+    <div class="intro-need">
+      <dt>The procedure</dt>
+      <dd>
+        A short description &mdash; for example, &ldquo;knee x-ray&rdquo; or
+        &ldquo;screening colonoscopy&rdquo; &mdash; or the CPT or DRG code if you know it.
+      </dd>
+    </div>
+    <div class="intro-need">
+      <dt>Your insurance plan</dt>
+      <dd>The insurer and plan name as shown on your insurance card.</dd>
+    </div>
+    <div class="intro-need">
+      <dt>The hospital</dt>
+      <dd>We currently support UPMC hospitals.</dd>
+    </div>
+  </dl>
+
+  <p>
+    If we need more detail to find the right match, we&rsquo;ll ask a follow-up question before
+    giving you a number.
+  </p>
+
+  <h2>Your estimate</h2>
+  <p>
+    We return the <strong>negotiated rate</strong> for your procedure. This is the price your
+    insurance company and the hospital have agreed on for that service. It is the full price
+    before your plan splits it between what insurance pays and what you pay. Your own cost
+    depends on your deductible, coinsurance, and out-of-pocket maximum, so your bill may be
+    much lower than the negotiated rate, or $0 if the service is preventive.
+  </p>
+
+  <h2>Please keep in mind</h2>
+  <ul class="intro-notes">
+    <li>
+      The negotiated rate is for a single service code. A hospital visit often includes several
+      billed services &mdash; such as a facility fee, a physician fee, and anesthesia &mdash;
+      each with its own rate.
+    </li>
+    <li>
+      We&rsquo;ll tell you which code we matched your description to. If it isn&rsquo;t the
+      procedure you had in mind, let us know and we&rsquo;ll look again.
+    </li>
+    <li>
+      This is a beta tool and the data comes from published hospital price files, which can be
+      incomplete. For your expected out-of-pocket cost, check with your insurer or the
+      hospital&rsquo;s own estimate tool.
+    </li>
+  </ul>
 </div>`}function Be(){return`
 <div class="suggestions">
   ${G.map((e,a)=>`<button class="suggestion" type="button" data-ask="${a}">${l(e)}</button>`).join("")}
@@ -1204,7 +1306,7 @@ ${t.size>1?`<div class="method-note">
           <span class="tick">${i==="done"?"\u2713":""}</span>
           <span>${l(t.label)}</span>
         </div>`}).join("")}
-  </div>`}function Je(e){if(e.status==="thinking")return`
+  </div>`}function qe(e){if(e.status==="thinking")return`
     <div class="thinking">
       <span class="pulse"><i></i><i></i><i></i></span>
       <span>Reading the published price file&hellip;</span>
@@ -1231,8 +1333,8 @@ ${t.size>1?`<div class="method-note">
       <span>Price assistant</span>
       ${a}
     </div>
-    <div class="bubble">${Je(e)}</div>
-  </div>`}function z(e){return e.length?`<div class="thread">${e.map(Y).join("")}</div>`:""}function Ve(e){return`
+    <div class="bubble">${qe(e)}</div>
+  </div>`}function z(e){return e.length?`<div class="thread">${e.map(Y).join("")}</div>`:""}function Je(e){return`
 <div class="composer-wrap">
   <div class="composer">
     <form class="composer-inner" id="ask-form" autocomplete="off">
@@ -1246,7 +1348,7 @@ ${t.size>1?`<div class="method-note">
       Answers come from prices hospitals are required to publish. Not medical or billing advice.
     </div>
   </div>
-</div>`}function qe(e){return`
+</div>`}function Ve(e){return`
 <footer class="colophon">
   Built on the CMU&ndash;NIST AIMSEC price-transparency pipeline: a language model turns your
   question into billing codes, the codes are checked against a retrieval index, and the validated
@@ -1339,12 +1441,12 @@ ${He(e,r)}
   <div class="chat-col">
     <div id="intro-slot">${a.length?"":we()+Be()}</div>
     <div id="thread-slot">${z(a)}</div>
-    ${a.length?"":qe(r)}
-    ${Ve(n)}
+    ${a.length?"":Ve(r)}
+    ${Je(n)}
   </div>
   <div id="pane-slot">${k(a,t)}</div>
 </div>
-<div id="about-slot">${R(i,r)}</div>`}var he="./pt_frontend.html",Ze="(min-width: 1101px)",I=document.getElementById("app");if(!I)throw new Error("#app mount point missing");var d={theme:O(),messages:[],pane:ce(),busy:!1,live:!1,aboutOpen:!1},Ke=1,T=()=>`m${Ke++}`,F=()=>{try{return window.matchMedia(Ze).matches}catch{return!0}};function $e(e){let a=e.code_plausible?.price_summary??[];return{grounding:se(e.answer??"",a),offers:oe(a),rows:a,seconds:e.total_seconds??0,matchCount:e.code_plausible?.match_count??a.length}}function me(e){let a=$e(e);return{id:T(),role:"bot",text:e.answer??"",grounding:a.grounding,offers:a.offers,rows:a.rows,seconds:a.seconds,matchCount:a.matchCount,steps:e.stages,status:"done"}}function pe(e){return e.grounding?.sources.length?"sources":(e.offers?.length??0)>=2?"compare":"prices"}function y(){let e=document.getElementById("pane-slot");e&&(e.innerHTML=k(d.messages,d.pane))}function v(){let e=document.getElementById("about-slot");e&&(e.innerHTML=R(d.aboutOpen,he)),document.body.classList.toggle("modal-open",d.aboutOpen)}function b(){document.documentElement.dataset.theme=d.theme,I.innerHTML=ue(d.theme,d.messages,d.pane,d.busy,d.aboutOpen,he),document.body.classList.toggle("modal-open",d.aboutOpen)}function W(e){let a=d.messages.find(n=>n.id===e),t=I.querySelector(`[data-msg="${e}"]`);if(a){if(t)t.outerHTML=Y(a);else{let n=document.getElementById("thread-slot");n&&(n.innerHTML=z(d.messages))}X()}}function X(e=!1){let a=window.innerHeight+window.scrollY>document.body.scrollHeight-240;if(e||a)try{window.scrollTo({top:document.body.scrollHeight,behavior:e?"smooth":"auto"})}catch{}}function Me(e){d.busy=e;let a=document.querySelector(".send");a&&(a.disabled=e,a.innerHTML=e?"":P)}function ea(){let e=document.getElementById("ask");e&&!e.disabled&&!d.busy&&e.focus({preventScroll:!0})}function aa(e){let a=document.getElementById("srcpane");if(!a)return;let t=a.querySelector(`.src[data-src="${e}"]`);if(!t)return;if(!F())try{a.scrollIntoView({behavior:"smooth",block:"start"})}catch{}let n=a.querySelector(".pane-body");if(n&&n.scrollHeight>n.clientHeight)try{let i=t.getBoundingClientRect().top-n.getBoundingClientRect().top;n.scrollTo({top:n.scrollTop+i-8,behavior:"smooth"})}catch{}t.classList.add("flash"),window.setTimeout(()=>t.classList.remove("flash"),1600)}function _e(e){let a=e.trim();if(!a||d.busy)return;d.messages.push({id:T(),role:"user",text:a,status:"done"});let t={id:T(),role:"bot",text:"",status:"thinking",steps:[]};if(d.messages.push(t),d.busy=!0,b(),X(!0),!d.live){window.setTimeout(()=>ge(ta(a),t.id),900);return}Z(a,{onStage(n){let i=t.steps??[],r=i.findIndex(s=>s.key===n.key);r>=0?i[r]={...i[r],...n}:i.push(n),t.steps=[...i],W(t.id)},onResult(n){t.status="done",ge(n,t.id)},onError(n){t.status="error",t.error=n,d.busy=!1,W(t.id),Me(!1)}})}function ge(e,a){let t=d.messages.findIndex(i=>i.id===a);if(t<0)return;let n=me(e);n.id=a,d.messages[t]=n,d.pane.focusedId=a,d.pane.tab=pe(n),d.busy=!1,W(a),y(),Me(!1),X(!0)}function ta(e){let a=e.toLowerCase();return x.find(t=>t.query.toLowerCase()===a)??x.find(t=>t.query.toLowerCase().split(/\s+/).filter(n=>n.length>6).some(n=>a.includes(n)))??x[0]}function Le(e){e.style.height="auto",e.style.height=`${Math.min(e.scrollHeight,140)}px`}I.addEventListener("submit",e=>{if(e.target.id!=="ask-form")return;e.preventDefault();let t=document.getElementById("ask"),n=t?.value??"";t&&(t.value="",Le(t)),_e(n)});I.addEventListener("keydown",e=>{e.target.id==="ask"&&e.key==="Enter"&&!e.shiftKey&&(e.preventDefault(),document.getElementById("ask-form")?.requestSubmit())});I.addEventListener("input",e=>{let a=e.target;a.id==="ask"&&Le(a)});I.addEventListener("click",e=>{let a=e.target;if(a.closest("[data-about]")){d.aboutOpen=!0,v();return}if(a.closest("[data-about-close]")||a.id==="about-overlay"){d.aboutOpen=!1,v();return}if(a.closest("#theme-toggle")){d.theme=te(),b();return}let t=a.closest("[data-ask]");if(t){_e(G[Number(t.dataset.ask)]??"");return}let n=a.closest("[data-tab]");if(n&&!n.hasAttribute("data-focus")){d.pane.tab=n.dataset.tab,y();return}if(a.closest("[data-pane-toggle]")){d.pane.open=!d.pane.open,y();return}if(a.closest("[data-sort-neg]")){d.pane.sortDir=d.pane.sortDir==="asc"?"desc":"asc",y();return}let i=a.closest("[data-focus]");if(i){d.pane.focusedId=i.dataset.focus??null,d.pane.tab="sources",d.pane.open=!0,y();try{document.getElementById("srcpane")?.scrollIntoView({behavior:"smooth",block:"start"})}catch{}return}let r=a.closest("[data-cite]");if(r){let s=Number((r.dataset.cite??"").split(",")[0]),h=r.closest(".msg")?.getAttribute("data-msg")??null;d.pane.focusedId=h,d.pane.tab="sources",d.pane.open=!0,y(),Number.isFinite(s)&&s>0&&aa(s);return}});document.addEventListener("keydown",e=>{e.key==="Escape"&&d.aboutOpen&&(d.aboutOpen=!1,v())});window.addEventListener("resize",()=>{let e=F();e!==d.pane.open&&(d.pane.open=e,y())});async function na(){H(O()),d.theme=O(),d.pane.open=F();let e=V();if(e){d.messages.push({id:T(),role:"user",text:e.query,status:"done"});let t=me(e);d.messages.push(t),d.pane.focusedId=t.id,d.pane.tab=pe(t)}b(),await q()&&(d.live=!0,e||b()),ea()}na();})();
+<div id="about-slot">${R(i,r)}</div>`}var he="./pt_frontend.html",Ze="(min-width: 1101px)",I=document.getElementById("app");if(!I)throw new Error("#app mount point missing");var d={theme:O(),messages:[],pane:ce(),busy:!1,live:!1,aboutOpen:!1},Ke=1,T=()=>`m${Ke++}`,F=()=>{try{return window.matchMedia(Ze).matches}catch{return!0}};function $e(e){let a=e.code_plausible?.price_summary??[];return{grounding:se(e.answer??"",a),offers:oe(a),rows:a,seconds:e.total_seconds??0,matchCount:e.code_plausible?.match_count??a.length}}function me(e){let a=$e(e);return{id:T(),role:"bot",text:e.answer??"",grounding:a.grounding,offers:a.offers,rows:a.rows,seconds:a.seconds,matchCount:a.matchCount,steps:e.stages,status:"done"}}function pe(e){return e.grounding?.sources.length?"sources":(e.offers?.length??0)>=2?"compare":"prices"}function y(){let e=document.getElementById("pane-slot");e&&(e.innerHTML=k(d.messages,d.pane))}function v(){let e=document.getElementById("about-slot");e&&(e.innerHTML=R(d.aboutOpen,he)),document.body.classList.toggle("modal-open",d.aboutOpen)}function b(){document.documentElement.dataset.theme=d.theme,I.innerHTML=ue(d.theme,d.messages,d.pane,d.busy,d.aboutOpen,he),document.body.classList.toggle("modal-open",d.aboutOpen)}function W(e){let a=d.messages.find(n=>n.id===e),t=I.querySelector(`[data-msg="${e}"]`);if(a){if(t)t.outerHTML=Y(a);else{let n=document.getElementById("thread-slot");n&&(n.innerHTML=z(d.messages))}X()}}function X(e=!1){let a=window.innerHeight+window.scrollY>document.body.scrollHeight-240;if(e||a)try{window.scrollTo({top:document.body.scrollHeight,behavior:e?"smooth":"auto"})}catch{}}function Me(e){d.busy=e;let a=document.querySelector(".send");a&&(a.disabled=e,a.innerHTML=e?"":P)}function ea(){let e=document.getElementById("ask");e&&!e.disabled&&!d.busy&&e.focus({preventScroll:!0})}function aa(e){let a=document.getElementById("srcpane");if(!a)return;let t=a.querySelector(`.src[data-src="${e}"]`);if(!t)return;if(!F())try{a.scrollIntoView({behavior:"smooth",block:"start"})}catch{}let n=a.querySelector(".pane-body");if(n&&n.scrollHeight>n.clientHeight)try{let i=t.getBoundingClientRect().top-n.getBoundingClientRect().top;n.scrollTo({top:n.scrollTop+i-8,behavior:"smooth"})}catch{}t.classList.add("flash"),window.setTimeout(()=>t.classList.remove("flash"),1600)}function _e(e){let a=e.trim();if(!a||d.busy)return;d.messages.push({id:T(),role:"user",text:a,status:"done"});let t={id:T(),role:"bot",text:"",status:"thinking",steps:[]};if(d.messages.push(t),d.busy=!0,b(),X(!0),!d.live){window.setTimeout(()=>ge(ta(a),t.id),900);return}Z(a,{onStage(n){let i=t.steps??[],r=i.findIndex(s=>s.key===n.key);r>=0?i[r]={...i[r],...n}:i.push(n),t.steps=[...i],W(t.id)},onResult(n){t.status="done",ge(n,t.id)},onError(n){t.status="error",t.error=n,d.busy=!1,W(t.id),Me(!1)}})}function ge(e,a){let t=d.messages.findIndex(i=>i.id===a);if(t<0)return;let n=me(e);n.id=a,d.messages[t]=n,d.pane.focusedId=a,d.pane.tab=pe(n),d.busy=!1,W(a),y(),Me(!1),X(!0)}function ta(e){let a=e.toLowerCase();return x.find(t=>t.query.toLowerCase()===a)??x.find(t=>t.query.toLowerCase().split(/\s+/).filter(n=>n.length>6).some(n=>a.includes(n)))??x[0]}function Le(e){e.style.height="auto",e.style.height=`${Math.min(e.scrollHeight,140)}px`}I.addEventListener("submit",e=>{if(e.target.id!=="ask-form")return;e.preventDefault();let t=document.getElementById("ask"),n=t?.value??"";t&&(t.value="",Le(t)),_e(n)});I.addEventListener("keydown",e=>{e.target.id==="ask"&&e.key==="Enter"&&!e.shiftKey&&(e.preventDefault(),document.getElementById("ask-form")?.requestSubmit())});I.addEventListener("input",e=>{let a=e.target;a.id==="ask"&&Le(a)});I.addEventListener("click",e=>{let a=e.target;if(a.closest("[data-about]")){d.aboutOpen=!0,v();return}if(a.closest("[data-about-close]")||a.id==="about-overlay"){d.aboutOpen=!1,v();return}if(a.closest("#theme-toggle")){d.theme=te(),b();return}let t=a.closest("[data-ask]");if(t){_e(G[Number(t.dataset.ask)]??"");return}let n=a.closest("[data-tab]");if(n&&!n.hasAttribute("data-focus")){d.pane.tab=n.dataset.tab,y();return}if(a.closest("[data-pane-toggle]")){d.pane.open=!d.pane.open,y();return}if(a.closest("[data-sort-neg]")){d.pane.sortDir=d.pane.sortDir==="asc"?"desc":"asc",y();return}let i=a.closest("[data-focus]");if(i){d.pane.focusedId=i.dataset.focus??null,d.pane.tab="sources",d.pane.open=!0,y();try{document.getElementById("srcpane")?.scrollIntoView({behavior:"smooth",block:"start"})}catch{}return}let r=a.closest("[data-cite]");if(r){let s=Number((r.dataset.cite??"").split(",")[0]),h=r.closest(".msg")?.getAttribute("data-msg")??null;d.pane.focusedId=h,d.pane.tab="sources",d.pane.open=!0,y(),Number.isFinite(s)&&s>0&&aa(s);return}});document.addEventListener("keydown",e=>{e.key==="Escape"&&d.aboutOpen&&(d.aboutOpen=!1,v())});window.addEventListener("resize",()=>{let e=F();e!==d.pane.open&&(d.pane.open=e,y())});async function na(){H(O()),d.theme=O(),d.pane.open=F();let e=J();if(e){d.messages.push({id:T(),role:"user",text:e.query,status:"done"});let t=me(e);d.messages.push(t),d.pane.focusedId=t.id,d.pane.tab=pe(t)}b(),await V()&&(d.live=!0,e||b()),ea()}na();})();
 
 </script>
 </body>
