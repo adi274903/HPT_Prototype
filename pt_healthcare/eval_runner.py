@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import statistics
 import sys
@@ -1055,28 +1056,106 @@ def catalog_from_qdrant(qdrant_path: Optional[Any] = None) -> Dict[str, Dict[str
     return out
 
 
+def find_qdrant_dir(explicit: Optional[Any] = None) -> Path:
+    """The Qdrant store directory, resolved the way the app resolves it.
+
+    Order: the argument, ``PT_QDRANT_PATH``, the package default, then the Colab
+    location ``/content/New_PT_DB``. A directory only counts if it looks like a
+    Qdrant local store (``meta.json`` or a ``collection/`` tree), because
+    ``QdrantClient(path=...)`` happily creates an empty store at a wrong path and
+    the failure then shows up much later as "collection not found".
+    """
+    from . import config as config_module
+
+    candidates: List[Path] = []
+    for value in (explicit, os.getenv("PT_QDRANT_PATH"), config_module.qdrant_dir(),
+                  "/content/New_PT_DB"):
+        if value:
+            candidates.append(Path(value))
+    candidates.append(Path.cwd() / "New_PT_DB")
+
+    seen: Set[Path] = set()
+    looked: List[str] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        looked.append(str(resolved))
+        if not resolved.is_dir():
+            continue
+        if (resolved / "meta.json").exists() or (resolved / "collection").is_dir():
+            return resolved
+
+    raise FileNotFoundError(
+        "Qdrant store not found. Looked in: " + ", ".join(looked) +
+        ". Pass qdrant_path=<dir>, set PT_QDRANT_PATH, or run colab_run.setup() first "
+        "(it stages the snapshot and exports PT_QDRANT_PATH). The lexical catalog "
+        "cannot be built without it unless you pass catalog_dir=<dir with cpt.csv>.")
+
+
+CATALOG_FILE = "code_catalog.json.gz"
+
+
+def catalog_from_dataset(dataset_dir: Optional[Any] = None) -> Optional[Dict[str, Dict[str, str]]]:
+    """The shipped ``code -> text`` map, if this checkout carries one.
+
+    A 393 KB gzipped JSON with 15,927 CPT and 13,497 HCPCS descriptions. Generated
+    once from the catalog CSVs that built the Qdrant collections, so it is the same
+    data the store holds — without an embedded-store lock, which matters because the
+    app's pipeline already has the store open when the eval starts.
+    """
+    import gzip
+
+    root = Path(__file__).resolve().parent.parent
+    candidates: List[Path] = []
+    if dataset_dir is not None:
+        candidates.append(Path(dataset_dir) / CATALOG_FILE)
+    candidates += [root / "eval_dataset" / CATALOG_FILE, root / "eval" / CATALOG_FILE]
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            catalog = json.load(handle)
+        if any(catalog.values()):
+            return catalog
+    return None
+
+
 def resolve_catalog(
     catalog_dir: Optional[Any] = None,
     qdrant_path: Optional[Any] = None,
 ) -> Dict[str, Dict[str, str]]:
-    """The lexical retriever's catalog: Qdrant first, the CSV files only as backup.
+    """``{family: {code: text}}`` for the lexical retriever, in the cheapest order.
 
-    The CSVs were the original source of ``code -> text``, but the same pairs are
-    already payloads in the store the app queries, and Colab has no
-    ``~/Downloads/*_embed_ready.csv``. Passing ``catalog_dir`` still forces the CSVs.
+    1. ``catalog_dir``      — explicit CSV files, for offline work
+    2. the shipped artifact — deterministic, no store lock, in the repo
+    3. the Qdrant store     — for a checkout without the artifact
+    4. raise, naming all three, instead of reaching for a desktop path
     """
-    if catalog_dir is None:
-        try:
-            catalog = catalog_from_qdrant(qdrant_path)
-            if any(catalog.values()):
-                return catalog
-            print("[eval] qdrant catalog is empty; falling back to CSV", file=sys.stderr)
-        except Exception as exc:  # missing store, missing client, unreadable
-            print(f"[eval] qdrant catalog unavailable ({exc}); falling back to CSV",
-                  file=sys.stderr)
+    if catalog_dir is not None:
+        return load_catalog_module()(Path(catalog_dir))
 
-    load_catalog = load_catalog_module()
-    return load_catalog(Path(catalog_dir)) if catalog_dir else load_catalog()
+    shipped = catalog_from_dataset()
+    if shipped is not None:
+        return shipped
+
+    try:
+        catalog = catalog_from_qdrant(find_qdrant_dir(qdrant_path))
+    except Exception as exc:
+        raise RuntimeError(
+            f"no code catalog available: {CATALOG_FILE} is missing from eval_dataset/ and "
+            f"the Qdrant store could not be read ({exc}). Pass catalog_dir=<dir with "
+            "cpt.csv and hcpcs.csv>, or restore the artifact with `git checkout "
+            "eval_dataset/code_catalog.json.gz`.") from exc
+
+    if not any(catalog.values()):
+        raise RuntimeError("the Qdrant store has no code payloads — is cpt_medte/hcpcs_medte populated?")
+    return catalog
 
 
 def build_client(backend: str, *, model: str, base_url: str, device: Optional[str] = None,

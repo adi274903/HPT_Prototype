@@ -397,9 +397,53 @@ def test_the_catalog_comes_from_qdrant_not_the_csv(monkeypatch, tmp_path):
     module = types.ModuleType("qdrant_client")
     module.QdrantClient = Client
     monkeypatch.setitem(sys.modules, "qdrant_client", module)
+    (tmp_path / "meta.json").write_text("{}")  # find_qdrant_dir only trusts a real store
 
     catalog = eval_runner.resolve_catalog(qdrant_path=tmp_path)
 
     assert catalog["CPT"]["77065"].startswith("Diagnostic mammography")
     assert catalog["HCPCS"]["G0204"].startswith("Diagnostic mammography")
     assert seen["path"] == str(tmp_path) and seen.get("closed") is True
+
+
+def test_the_store_is_found_from_the_environment_or_content(monkeypatch, tmp_path):
+    """colab_run.setup exports PT_QDRANT_PATH; evaluate() must honour it."""
+    from pt_healthcare.eval_runner import find_qdrant_dir
+
+    store = tmp_path / "New_PT_DB"
+    store.mkdir()
+    (store / "meta.json").write_text("{}")
+
+    monkeypatch.setenv("PT_QDRANT_PATH", str(store))
+    assert find_qdrant_dir() == store.resolve()
+
+    monkeypatch.delenv("PT_QDRANT_PATH")
+    monkeypatch.setattr("pt_healthcare.config.qdrant_dir", lambda: str(tmp_path / "nope"))
+
+
+def test_a_missing_store_says_where_it_looked(monkeypatch, tmp_path):
+    import pytest
+
+    from pt_healthcare.eval_runner import find_qdrant_dir
+
+    monkeypatch.setenv("PT_QDRANT_PATH", str(tmp_path / "absent"))
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        find_qdrant_dir()
+
+    message = str(excinfo.value)
+    assert "PT_QDRANT_PATH" in message
+    assert "/content/New_PT_DB" in message
+    assert str(tmp_path / "absent") in message
+
+
+def test_the_shipped_catalog_needs_no_store_and_no_downloads():
+    """The eval must run on a bare Colab checkout: no lock, no ~/Downloads."""
+    from pt_healthcare.eval_runner import resolve_catalog
+
+    catalog = resolve_catalog(qdrant_path="/nonexistent/store")
+
+    assert len(catalog["CPT"]) > 15000
+    assert len(catalog["HCPCS"]) > 13000
+    assert catalog["CPT"]["77065"].startswith("Diagnostic mammography")

@@ -478,6 +478,12 @@ def setup(
     if stage:
         resolved_db = stage_db(verbose=verbose)
 
+    # Export what we resolved: evaluate(), EmbeddingRetriever and Pipeline each read
+    # these from the environment, and a second resolution could pick a different path.
+    os.environ["PT_QDRANT_PATH"] = str(resolved_db)
+    if resolved_mrf:
+        os.environ["PT_MRF_CSV"] = str(resolved_mrf)
+
     if verbose:
         print(f"MRF CSV   : {resolved_mrf}")
         print(f"Qdrant DB : {resolved_db}")
