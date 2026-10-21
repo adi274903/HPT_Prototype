@@ -55,7 +55,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 import duckdb
 
@@ -307,6 +307,86 @@ class TransformersClient:
             return Completion(text="", prompt_tokens=0, completion_tokens=0,
                               latency_ms=(time.perf_counter() - started) * 1000,
                               error=f"{type(exc).__name__}: {exc}")
+
+
+class VLLMInProcessClient:
+    """``vllm.LLM`` in this process — no ``vllm serve``, no port, no base URL.
+
+    Same ``complete()`` surface as :class:`ChatClient`, so the runner cannot tell
+    the difference. Weights are paged and CUDA graphs captured once at startup,
+    then every case is a batched call in-process, which is where the speed is.
+    """
+
+    def __init__(self, model: str = "google/medgemma-1.5-4b-it",
+                 max_model_len: int = 8192, gpu_memory_utilization: float = 0.90,
+                 dtype: str = "bfloat16", max_tokens: int = 512,
+                 temperature: float = 0.0, seed: int = 13, **llm_kwargs: Any) -> None:
+        from vllm import LLM  # lazy: the hf backend must not need it installed
+
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.seed = seed
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.llm = LLM(model=model, max_model_len=max_model_len,
+                       gpu_memory_utilization=gpu_memory_utilization, dtype=dtype,
+                       **llm_kwargs)
+
+    def complete(self, prompt: str, max_tokens: Optional[int] = None) -> Completion:
+        from vllm import SamplingParams
+
+        started = time.perf_counter()
+        try:
+            outputs = self.llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+                sampling_params=SamplingParams(
+                    max_tokens=max_tokens or self.max_tokens,
+                    temperature=self.temperature,
+                    seed=self.seed,
+                ),
+            )
+            completion = outputs[0]
+            text = completion.outputs[0].text or ""
+            prompt_tokens = len(completion.prompt_token_ids or [])
+            completion_tokens = len(completion.outputs[0].token_ids or [])
+            self.tokens_in += prompt_tokens
+            self.tokens_out += completion_tokens
+            return Completion(text=text, prompt_tokens=prompt_tokens,
+                              completion_tokens=completion_tokens,
+                              latency_ms=(time.perf_counter() - started) * 1000)
+        except Exception as exc:  # noqa: BLE001 - one bad generation must not end a run
+            return Completion(text="", prompt_tokens=0, completion_tokens=0,
+                              latency_ms=(time.perf_counter() - started) * 1000,
+                              error=f"{type(exc).__name__}: {exc}")
+
+
+class LlamaCppClient:
+    """``llama_cpp.Llama`` in this process — the CPU-or-GPU fallback, also no server."""
+
+    def __init__(self, gguf: str, n_ctx: int = 8192, n_gpu_layers: int = -1,
+                 max_tokens: int = 512, temperature: float = 0.0, **kwargs: Any) -> None:
+        from .backends import LlamaCppPipe
+
+        self.pipe = LlamaCppPipe(gguf, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, **kwargs)
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.tokens_in = 0
+        self.tokens_out = 0
+
+    def complete(self, prompt: str, max_tokens: Optional[int] = None) -> Completion:
+        started = time.perf_counter()
+        text = self.pipe(text=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                         max_new_tokens=max_tokens or self.max_tokens,
+                         do_sample=self.temperature > 0)[0]["generated_text"][-1]["content"]
+        usage = self.pipe.last_usage or {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        self.tokens_in += prompt_tokens
+        self.tokens_out += completion_tokens
+        return Completion(text=text, prompt_tokens=prompt_tokens,
+                          completion_tokens=completion_tokens,
+                          latency_ms=(time.perf_counter() - started) * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -853,11 +933,204 @@ def load_jsonl(path: Path) -> List[Dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def find_dataset_dir(explicit: Optional[Any] = None, root: Optional[Path] = None) -> Path:
+    """Where ``pt_eval_v2.jsonl`` lives, without making the caller guess.
+
+    The dataset sat in ``eval_dataset/`` on the harness branch and in ``eval/`` in
+    the development checkout; both are searched so a notebook cell needs no path.
+    """
+    if explicit is not None:
+        path = Path(explicit)
+        if not (path / "pt_eval_v2.jsonl").exists():
+            raise FileNotFoundError(f"{path} has no pt_eval_v2.jsonl")
+        return path
+
+    root = Path(root or Path(__file__).resolve().parent.parent)
+    for name in ("eval_dataset", "eval"):
+        candidate = root / name
+        if (candidate / "pt_eval_v2.jsonl").exists():
+            return candidate
+    raise FileNotFoundError(
+        f"no pt_eval_v2.jsonl under {root}/eval_dataset or {root}/eval — "
+        "pass dataset=/path/to/dir")
+
+
+def load_catalog_module():
+    """``eval/categories.py`` (or ``eval_code_gen/``) as an importable module."""
+    root = Path(__file__).resolve().parent.parent
+    for directory in (root / "eval_code_gen", root / "eval"):
+        if (directory / "categories.py").exists():
+            sys.path.insert(0, str(directory))
+            break
+    from categories import load_catalog  # type: ignore
+
+    return load_catalog
+
+
+def build_client(backend: str, *, model: str, base_url: str, device: Optional[str] = None,
+                 gguf: Optional[str] = None, n_gpu_layers: int = -1,
+                 max_model_len: int = 8192, max_tokens: int = 512,
+                 gpu_memory_utilization: float = 0.90) -> Any:
+    """One name in, one ``complete()``-shaped object out.
+
+    ``vllm`` and ``llamacpp`` load the weights in this process — no server, no
+    port. ``remote`` is the served-OpenAI-compatible client, ``hf`` the package's
+    own transformers pipeline. Unknown names raise instead of quietly falling back
+    to an 8 GB download.
+    """
+    choice = (backend or "").strip().lower()
+
+    if choice == "vllm":
+        return VLLMInProcessClient(model=model, max_model_len=max_model_len,
+                                   gpu_memory_utilization=gpu_memory_utilization,
+                                   max_tokens=max_tokens)
+    if choice == "llamacpp":
+        from . import config
+
+        path = gguf or config.llm_gguf_path()
+        if not path:
+            raise ValueError("backend='llamacpp' needs gguf=/path/to/model.gguf "
+                             "(or PT_LLM_GGUF)")
+        return LlamaCppClient(path, n_ctx=max_model_len, n_gpu_layers=n_gpu_layers,
+                              max_tokens=max_tokens)
+    if choice in ("remote", "served", "openai"):
+        return ChatClient(base_url, model, max_tokens=max_tokens)
+    if choice in ("hf", "transformers"):
+        return TransformersClient(device=device, max_tokens=max_tokens)
+
+    raise ValueError(f"unknown backend={backend!r}: use vllm, llamacpp, remote or hf")
+
+
+def evaluate(
+    dataset: Optional[Any] = None,
+    *,
+    backend: str = "vllm",
+    model: str = "google/medgemma-1.5-4b-it",
+    base_url: str = "http://localhost:8000/v1",
+    db: Any = ".cache/mrf_eval.duckdb",
+    catalog_dir: Optional[Any] = None,
+    retriever: str = "lexical",
+    qdrant_path: Optional[str] = None,
+    top_k: int = 10,
+    retrieve: str = "both",
+    subtypes: Sequence[str] = (),
+    per_subtype: int = 0,
+    limit: int = 0,
+    fresh: bool = False,
+    out: Any = "eval_run.jsonl",
+    report_path: Optional[Any] = "eval_report.json",
+    device: Optional[str] = None,
+    gguf: Optional[str] = None,
+    n_gpu_layers: int = -1,
+    max_model_len: int = 8192,
+    max_tokens: int = 512,
+    gpu_memory_utilization: float = 0.90,
+    client: Optional[Any] = None,
+    progress: Optional[Any] = print,
+) -> Dict[str, Any]:
+    """Score the pipeline over ``pt_eval_v2`` and return the aggregate report.
+
+    The plain-Python entry point — a notebook cell is one line::
+
+        from pt_healthcare.eval_runner import evaluate
+        report = evaluate()                      # all 600 cases, in-process vLLM
+        report["codes"]["dice_mrf"], report["rows"]["dice_raw"]
+
+    Every argument mirrors a :func:`main` flag. Pass ``client=`` to score with
+    something else (a stub, a different model) — it needs only ``complete()``.
+
+    A run is resumable: records are appended to ``out`` as they finish and cases
+    already in that file are skipped, so a Colab disconnect costs the cases in
+    flight rather than the whole run. ``fresh=True`` starts over.
+    """
+    dataset_dir = find_dataset_dir(dataset)
+    cases = load_jsonl(dataset_dir / "pt_eval_v2.jsonl")
+    targets = {record["eval_id"]: record for record in load_jsonl(dataset_dir / "pt_eval_v2_targets.jsonl")}
+
+    wanted = {str(value).strip().upper() for value in subtypes if str(value).strip()}
+    if wanted:
+        cases = [case for case in cases if str(case["eval_id"]).rsplit("_", 1)[-1] in wanted]
+    if per_subtype:
+        seen: Dict[str, int] = {}
+        picked: List[Dict[str, Any]] = []
+        for case in cases:
+            subtype = str(case["eval_id"]).rsplit("_", 1)[-1]
+            if seen.get(subtype, 0) < per_subtype:
+                seen[subtype] = seen.get(subtype, 0) + 1
+                picked.append(case)
+        cases = picked
+    if limit:
+        cases = cases[:limit]
+
+    db_path = Path(db)
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"{db_path} is missing — build it once with "
+            f"`python scripts/prepare_eval_mrf.py --mrf <everyUPMCmrf_clean.csv> --out {db_path}`")
+
+    pricer = Pricer(db_path)
+    try:
+        retriever_object: Any = None
+        if retriever == "qdrant":
+            retriever_object = EmbeddingRetriever(qdrant_path=qdrant_path, top_k=top_k)
+        else:
+            load_catalog = load_catalog_module()
+            catalog = load_catalog(Path(catalog_dir)) if catalog_dir else load_catalog()
+            retriever_object = CatalogRetriever(catalog)
+        if client is None:
+            client = build_client(backend, model=model, base_url=base_url, device=device,
+                                  gguf=gguf, n_gpu_layers=n_gpu_layers,
+                                  max_model_len=max_model_len, max_tokens=max_tokens,
+                                  gpu_memory_utilization=gpu_memory_utilization)
+
+        runner = Runner(client=cast("ChatClient", client), retriever=retriever_object, pricer=pricer,
+                        top_k=top_k, retrieve_family=retrieve)
+
+        out_path = Path(out)
+        previous = [] if fresh else (load_jsonl(out_path) if out_path.exists() else [])
+        done = {str(record.get("eval_id")): record for record in previous if record.get("eval_id")}
+        records: List[Dict[str, Any]] = list(done.values())
+        with out_path.open("a" if done else "w", encoding="utf-8") as handle:
+            for index, case in enumerate(cases, start=1):
+                if str(case["eval_id"]) in done:
+                    if progress:
+                        progress(f"[{index}/{len(cases)}] {case['eval_id']} cached")
+                    continue
+                record = runner.run_case(case, targets[case["eval_id"]])
+                records.append(record)
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.flush()
+                if progress:
+                    progress(f"[{index}/{len(cases)}] {case['eval_id']} "
+                             f"codes_dice={record['codes']['dice_mrf']} "
+                             f"rows_dice={record['rows']['dice_raw']} intent={record['intent_pred']}")
+
+        report = aggregate(records, {
+            "backend": backend, "model": model, "base_url": base_url,
+            "retriever": retriever, "top_k": top_k, "dataset": str(dataset_dir),
+            "prompt_tokens": getattr(client, "tokens_in", None),
+            "completion_tokens": getattr(client, "tokens_out", None),
+        })
+        if report_path:
+            Path(report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return report
+    finally:
+        pricer.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate the HPT pipeline against eval_dataset.")
+    parser.add_argument("--backend", default="vllm",
+                        choices=["vllm", "llamacpp", "remote", "hf"],
+                        help="vllm and llamacpp load the model in this process; "
+                             "remote talks to a served /v1; hf uses transformers")
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--model", default="google/medgemma-1.5-4b-it")
-    parser.add_argument("--dataset", default="eval_dataset")
+    parser.add_argument("--gguf", default=None, help="llamacpp backend: path to the .gguf")
+    parser.add_argument("--n-gpu-layers", type=int, default=-1)
+    parser.add_argument("--max-model-len", type=int, default=8192)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    parser.add_argument("--dataset", default=None, help="dir with pt_eval_v2.jsonl (auto-detected)")
     parser.add_argument("--db", default=".cache/mrf_eval.duckdb")
     parser.add_argument("--catalog-dir", default=None, help="dir holding cpt.csv/hcpcs.csv")
     parser.add_argument("--limit", type=int, default=0)
@@ -866,8 +1139,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--subtypes", default="", help="comma separated, e.g. A1,C1,D1")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--retrieve", default="both", choices=["both", "cpt", "hcpcs"])
-    parser.add_argument("--backend", default="vllm", choices=["vllm", "hf"],
-                        help="hf loads MedGemma in-process; vllm talks to a served endpoint")
     parser.add_argument("--device", default=None, help="hf backend device, e.g. cuda")
     parser.add_argument("--retriever", default="lexical", choices=["lexical", "qdrant"],
                         help="lexical needs no GPU; qdrant loads MedTE and the snapshot")
@@ -878,69 +1149,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--report", default="eval_report.json")
     args = parser.parse_args(argv)
 
-    dataset = Path(args.dataset)
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval_code_gen"))
-    try:
-        from categories import load_catalog  # type: ignore
-    except ImportError:  # development checkout keeps the generators in eval/
-        from eval.categories import load_catalog  # type: ignore
-
-    catalog = load_catalog(Path(args.catalog_dir)) if args.catalog_dir else load_catalog()
-
-    client: Any = (TransformersClient(device=args.device) if args.backend == "hf"
-                   else ChatClient(args.base_url, args.model))
-    pricer = Pricer(Path(args.db))
-    if args.retriever == "qdrant":
-        retriever: Any = EmbeddingRetriever(qdrant_path=args.qdrant_path, top_k=args.top_k)
-    else:
-        retriever = CatalogRetriever(catalog)
-    runner = Runner(client=client, retriever=retriever, pricer=pricer,
-                    top_k=args.top_k, retrieve_family=args.retrieve)
-
-    cases = load_jsonl(dataset / "pt_eval_v2.jsonl")
-    targets = {record["eval_id"]: record for record in load_jsonl(dataset / "pt_eval_v2_targets.jsonl")}
-    wanted = {value.strip().upper() for value in args.subtypes.split(",") if value.strip()}
-    if wanted:
-        cases = [case for case in cases if str(case["eval_id"]).rsplit("_", 1)[-1] in wanted]
-    if args.per_subtype:
-        seen: Dict[str, int] = {}
-        picked: List[Dict[str, Any]] = []
-        for case in cases:
-            subtype = str(case["eval_id"]).rsplit("_", 1)[-1]
-            if seen.get(subtype, 0) < args.per_subtype:
-                seen[subtype] = seen.get(subtype, 0) + 1
-                picked.append(case)
-        cases = picked
-    if args.limit:
-        cases = cases[:args.limit]
-
-    # A 600-case run is ~2400 generations: on a rented GPU that is hours, and a
-    # Colab disconnect mid-run must not cost the whole run. Records are appended
-    # as they complete and already-scored cases are skipped on the next attempt.
-    out_path = Path(args.out)
-    previous = [] if args.fresh or not out_path.exists() else load_jsonl(out_path)
-    done = {str(record.get("eval_id")): record for record in previous if record.get("eval_id")}
-    records: List[Dict[str, Any]] = list(done.values())
-    with out_path.open("a" if done else "w", encoding="utf-8") as handle:
-        for index, case in enumerate(cases, start=1):
-            if str(case["eval_id"]) in done:
-                print(f"[{index}/{len(cases)}] {case['eval_id']} cached", flush=True)
-                continue
-            record = runner.run_case(case, targets[case["eval_id"]])
-            records.append(record)
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            handle.flush()
-            print(f"[{index}/{len(cases)}] {case['eval_id']} codes_dice={record['codes']['dice_mrf']} "
-                  f"rows_dice={record['rows']['dice_raw']} intent={record['intent_pred']}", flush=True)
-
-    report = aggregate(records, {"base_url": args.base_url, "model": args.model,
-                                 "retriever": args.retriever, "backend": args.backend,
-                                 "top_k": args.top_k,
-                                 "prompt_tokens": client.tokens_in, "completion_tokens": client.tokens_out})
-    Path(args.report).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report = evaluate(
+        args.dataset, backend=args.backend, model=args.model, base_url=args.base_url,
+        db=args.db, catalog_dir=args.catalog_dir, retriever=args.retriever,
+        qdrant_path=args.qdrant_path, top_k=args.top_k, retrieve=args.retrieve,
+        subtypes=[value for value in args.subtypes.split(",") if value.strip()],
+        per_subtype=args.per_subtype, limit=args.limit, fresh=args.fresh,
+        out=args.out, report_path=args.report, device=args.device, gguf=args.gguf,
+        n_gpu_layers=args.n_gpu_layers, max_model_len=args.max_model_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
     print()
     print(format_report(report))
-    pricer.close()
     return 0
 
 

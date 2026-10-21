@@ -403,6 +403,39 @@ lines, so the UI reports the real backend's behaviour rather than a
 reimplementation of it. The front-end sources and its own test suite live in
 `~/projects/reseearch_work/Price_Transparency/frontend`.
 
+## Evaluate
+
+`pt_healthcare/eval_runner.py` scores the pipeline over `eval/pt_eval_v2.jsonl`
+(600 cases, ten subtypes). Dice and Jaccard for the predicted codes **and** for the
+MRF rows behind them, F1 for intent and for each entity field, and whether every
+dollar figure in the answer is grounded in a rate that exists in the data.
+
+The function, from a notebook or a script:
+
+```python
+from pt_healthcare.eval_runner import evaluate, format_report
+
+report = evaluate()                       # 600 cases, in-process vLLM
+report["codes"]["dice_mrf"], report["rows"]["dice_raw"], report["ner"]["hospital"]["f1"]
+```
+
+`evaluate()` builds `vllm.LLM` inside the process (no `vllm serve`, no port), or
+`llama_cpp.Llama` with `backend="llamacpp"` and `gguf=…` — the same two backends
+the app uses. Pass `client=` to score with anything else that has `complete()`.
+
+Two prerequisites, once:
+
+```bash
+python scripts/prepare_eval_mrf.py --mrf ~/Downloads/everyUPMCmrf_clean.csv \
+                                   --out .cache/mrf_eval.duckdb   # ~8 min, 509 MB
+```
+
+The CLI is the same code with flags: `python -m pt_healthcare.eval_runner --help`.
+Every finished case is appended to `eval_run.jsonl`, and a rerun skips what is
+already in it — a 600-case run is ~2,400 generations, so a disconnect must not
+cost the whole run. `--fresh` starts over; `--per-subtype 1` is a ten-case
+smoke run.
+
 ## Tests
 
 The pure components (parsing, utils, pricing, retrieval plumbing, prompt
