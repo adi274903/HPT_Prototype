@@ -159,3 +159,29 @@ def test_llamacpp_without_a_gguf_says_what_is_missing(monkeypatch):
 
     with pytest.raises(ValueError, match="PT_LLM_GGUF"):
         load_models()
+
+
+def test_a_prebuilt_llm_is_shared_instead_of_loaded_twice(monkeypatch):
+    """The UI and the eval must hold one copy of the weights, not two."""
+    import sys
+    import types
+
+    from pt_healthcare.backends import VLLMPipe
+
+    built = []
+
+    class LLM:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+
+    module = types.ModuleType("vllm")
+    module.LLM = LLM
+    module.SamplingParams = lambda **kwargs: type("Params", (), kwargs)()
+    monkeypatch.setitem(sys.modules, "vllm", module)
+
+    shared = LLM(model="already-loaded")
+    built.clear()  # the fixture above has built exactly one, and only one is wanted
+    pipe = VLLMPipe(llm=shared)
+
+    assert pipe._llm is shared
+    assert built == [], "passing an instance must not construct a second one"

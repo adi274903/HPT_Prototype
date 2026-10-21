@@ -144,13 +144,16 @@ class VLLMPipe:
         gpu_memory_utilization: float = 0.90,
         dtype: str = "bfloat16",
         trust_remote_code: bool = False,
+        llm: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         from vllm import LLM  # lazy: only needed on this path
 
         self.model = model
         self.last_usage: Dict[str, int] = {}
-        self._llm = LLM(
+        # ``llm`` is an instance someone else built — the app and the eval share
+        # one so a 40 GB card holds one copy of the weights, not two.
+        self._llm = llm if llm is not None else LLM(
             model=model,
             max_model_len=max_model_len,
             gpu_memory_utilization=gpu_memory_utilization,

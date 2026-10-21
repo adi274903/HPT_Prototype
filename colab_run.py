@@ -394,6 +394,7 @@ def build_pipeline(
     login: bool = True,
     token: Optional[str] = None,
     install: Optional[bool] = None,
+    pipe: Optional[Any] = None,
 ) -> HealthcarePricingPipeline:
     """Load models + data and return a ready-to-run pipeline.
 
@@ -413,7 +414,7 @@ def build_pipeline(
     if login:
         login_huggingface(token or hf_token())
 
-    pipe, embed_model = load_models(device=device)
+    pipe, embed_model = load_models(device=device, pipe=pipe)
 
     client = get_qdrant_client(resolve_qdrant_path(qdrant_path))
     mrf_data = load_mrf_data(resolve_mrf_csv(mrf_csv))
@@ -439,6 +440,7 @@ def setup(
     token: Optional[str] = None,
     env_file: Optional[str] = None,
     verbose: bool = True,
+    pipe: Optional[Any] = None,
 ) -> HealthcarePricingPipeline:
     """One-call Colab bootstrap: install deps, mount Drive, stage the DB, wire models.
 
@@ -446,6 +448,12 @@ def setup(
 
         pipeline = setup()
         pipeline.run("...")
+
+    ``pipe`` is an already-built generator (``VLLMPipe``, ``LlamaCppPipe``, …).
+    Pass one to share a single set of weights with the eval::
+
+        gateway = VLLMPipe("google/medgemma-1.5-4b-it")
+        pipeline = setup(mount=False, stage=False, pipe=gateway)
 
     ``env_file`` points at a specific ``.env``; otherwise the working directory,
     ``/content`` and the repo root are searched, and any ``PT_*`` value found
@@ -481,6 +489,7 @@ def setup(
         top_k=top_k,
         token=token,
         install=False,  # already ensured above
+        pipe=pipe,
     )
 
 

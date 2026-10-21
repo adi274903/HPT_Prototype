@@ -13,11 +13,19 @@ from typing import Any, Optional, Tuple
 from . import config
 
 
+def load_embedder() -> Any:
+    """The MedTE sentence embedder. Retrieval has no backend behind it."""
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(config.embedding_model_id())
+
+
 def load_models(
     device: str = "cuda",
     dtype: Optional[Any] = None,
     backend: Optional[str] = None,
     gguf: Optional[str] = None,
+    pipe: Optional[Any] = None,
 ) -> Tuple[Any, Any]:
     """Load and return ``(medgemma_pipe, sentence_transformer)``.
 
@@ -30,6 +38,10 @@ def load_models(
 
     Only the generator changes. The embedder is always loaded here: retrieval has
     no backend behind it.
+
+    ``pipe`` is an already-loaded generator, used as-is. That is how the app and
+    the eval share one set of weights: build the vLLM instance once, hand it to
+    both, and 40 GB of A100 holds one copy instead of two.
 
     Parameters
     ----------
@@ -46,13 +58,15 @@ def load_models(
 
     choice = (backend or config.llm_backend()).strip().lower()
 
-    if choice == "llamacpp":
+    if pipe is not None:
+        pass  # already loaded; the caller owns it and both callers share it
+    elif choice == "llamacpp":
         from .backends import LlamaCppPipe
 
         path = gguf or config.llm_gguf_path()
         if not path:
             raise ValueError("PT_LLM_BACKEND=llamacpp needs PT_LLM_GGUF=/path/to/model.gguf")
-        pipe: Any = LlamaCppPipe(
+        pipe = LlamaCppPipe(
             path,
             n_ctx=config.llm_max_model_len(),
             n_gpu_layers=config.llm_n_gpu_layers(),
@@ -86,6 +100,4 @@ def load_models(
             f"unknown PT_LLM_BACKEND={choice!r}: use transformers, llamacpp, vllm or remote"
         )
 
-    embed_model = SentenceTransformer(config.embedding_model_id())
-
-    return pipe, embed_model
+    return pipe, load_embedder()

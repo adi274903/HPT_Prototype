@@ -320,7 +320,8 @@ class VLLMInProcessClient:
     def __init__(self, model: str = "google/medgemma-1.5-4b-it",
                  max_model_len: int = 8192, gpu_memory_utilization: float = 0.90,
                  dtype: str = "bfloat16", max_tokens: int = 512,
-                 temperature: float = 0.0, seed: int = 13, **llm_kwargs: Any) -> None:
+                 temperature: float = 0.0, seed: int = 13,
+                 llm: Optional[Any] = None, **llm_kwargs: Any) -> None:
         from vllm import LLM  # lazy: the hf backend must not need it installed
 
         self.model = model
@@ -329,9 +330,11 @@ class VLLMInProcessClient:
         self.seed = seed
         self.tokens_in = 0
         self.tokens_out = 0
-        self.llm = LLM(model=model, max_model_len=max_model_len,
-                       gpu_memory_utilization=gpu_memory_utilization, dtype=dtype,
-                       **llm_kwargs)
+        # Share one loaded model with the UI instead of paying for two.
+        self.llm = llm if llm is not None else LLM(
+            model=model, max_model_len=max_model_len,
+            gpu_memory_utilization=gpu_memory_utilization, dtype=dtype,
+            **llm_kwargs)
 
     def complete(self, prompt: str, max_tokens: Optional[int] = None) -> Completion:
         from vllm import SamplingParams
