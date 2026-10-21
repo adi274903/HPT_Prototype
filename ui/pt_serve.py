@@ -577,9 +577,12 @@ class _Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stream":
             query = ""
+            session = ""
             if "?" in self.path:
-                query = (parse_qs(self.path.split("?", 1)[1]).get("q") or [""])[0]
-            self._stream(query)
+                params = parse_qs(self.path.split("?", 1)[1])
+                query = (params.get("q") or [""])[0]
+                session = (params.get("session") or [""])[0]
+            self._stream(query, session)
             return
 
         self._send(404, b"not found", "text/plain")
@@ -600,7 +603,10 @@ class _Handler(BaseHTTPRequestHandler):
             if self.runner is None:
                 self._json({"error": "server not initialised"}, 500)
                 return
-            self._json({"run": start_run(self.runner, query), "state": "running"})
+            session = str(payload.get("session") or "")
+            self._json(
+                {"run": start_run(self.runner, query, session), "state": "running"}
+            )
             return
 
         if path != "/api/query":
@@ -622,15 +628,21 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": "server not initialised"}, 500)
             return
 
-        result, log, elapsed, error = self.runner.run(query, lambda _l: None)
+        session = str(payload.get("session") or "")
+        prompt = build_prompt(query, _session_turns(session))
+        result, log, elapsed, error = self.runner.run(prompt, lambda _l: None)
         if error is not None:
             self._json({"error": f"{type(error).__name__}: {error}"}, 500)
             return
-        self._json(to_payload(query=query, result=result, run_log=log, total_seconds=elapsed))
+        payload_out = to_payload(
+            query=query, result=result, run_log=log, total_seconds=elapsed
+        )
+        remember(session, query, payload_out)
+        self._json(payload_out)
 
     # ── streaming ────────────────────────────────────────────────────────
 
-    def _stream(self, query: str) -> None:
+    def _stream(self, query: str, session: str = "") -> None:
         self._sse_open()
         if not query.strip():
             self._sse({"type": "error", "message": "empty query"})
@@ -676,7 +688,9 @@ class _Handler(BaseHTTPRequestHandler):
                 emit_stage(STAGE_KEYS.index("mrf"), detail=f"{m.group(1)} rows matched")
 
         try:
-            result, log, elapsed, error = self.runner.run(query, on_line)
+            result, log, elapsed, error = self.runner.run(
+                build_prompt(query, _session_turns(session)), on_line
+            )
 
             for i, s in enumerate(stages):
                 if s["state"] in ("active", "pending"):
@@ -710,6 +724,86 @@ _RUN_GATE = threading.Lock()  # one pipeline at a time: the models are not reent
 _RUN_TTL = 30 * 60
 _RUN_KEEP = 20
 
+# Conversation memory. A follow-up — "what's the cheapest insurer for that?" —
+# means nothing on its own, so the previous turns that did resolve are folded
+# into the prompt the pipeline sees. The payload keeps the question as typed.
+_TURNS: dict[str, list[dict]] = {}
+_TURN_KEEP = 6
+_SESSION_KEEP = 200
+
+
+def _session_turns(session: str) -> list[dict]:
+    """The resolved turns recorded for this conversation, oldest first."""
+    if not session:
+        return []
+    with _RUN_LOCK:
+        return [dict(t) for t in _TURNS.get(session, ())]
+
+
+def digest(query: str, payload: dict) -> dict:
+    """What a turn settled on — the bits a follow-up would refer back to."""
+    decision = payload.get("decision") or {}
+    categorized = payload.get("categorized") or {}
+    codes = [
+        str(c)
+        for c in list(decision.get("cpt_list") or []) + list(decision.get("hcpcs_list") or [])
+        if c
+    ]
+    return {
+        "query": query,
+        "codes": codes[:6],
+        "hospital": [str(h) for h in (categorized.get("hospital") or [])][:3],
+        "insurer": [str(i) for i in (categorized.get("insurer") or [])][:3],
+    }
+
+
+def remember(session: str, query: str, payload: dict) -> None:
+    """Keep this turn, so the next one can lean on it."""
+    if not session:
+        return
+    turn = digest(query, payload)
+    with _RUN_LOCK:
+        turns = _TURNS.setdefault(session, [])
+        turns.append(turn)
+        del turns[:-_TURN_KEEP]
+        while len(_TURNS) > _SESSION_KEEP:
+            _TURNS.pop(next(iter(_TURNS)))
+
+
+def build_prompt(query: str, turns: list[dict], keep: int = 2) -> str:
+    """Fold the preceding turns into the prompt so a follow-up has an antecedent.
+
+    The pipeline extracts entities from one string. "What's the cheapest insurer
+    for that?" carries none of the procedure, hospital or code the previous turn
+    established, so it is answered as if it were a fresh, empty question.
+    """
+    recent = [t for t in (turns or []) if t.get("query")][-keep:]
+    if not recent:
+        return query
+
+    lines = ["Earlier in this conversation:"]
+    for turn in recent:
+        bits = []
+        if turn.get("codes"):
+            bits.append("code " + ", ".join(turn["codes"][:4]))
+        if turn.get("hospital"):
+            bits.append("at " + ", ".join(turn["hospital"][:2]))
+        tail = f" -> {'; '.join(bits)}" if bits else " -> nothing matched"
+        lines.append(f'- "{turn["query"]}"{tail}')
+    lines.append("")
+    lines.append(f'Follow-up: "{query}"')
+    lines.append(
+        'If the follow-up refers back to the earlier question — "that", "it", '
+        '"the same hospital" — answer it using the procedure and hospital above. '
+        "If it is a complete question in its own right, ignore the earlier turn."
+    )
+    lines.append(
+        "The insurer is not carried over: if the follow-up asks which plan or "
+        "insurer is cheapest, compare across insurers instead of assuming the "
+        "one from the earlier question."
+    )
+    return "\n".join(lines)
+
 
 def _purge_runs() -> None:
     """Drop finished runs that are old, then trim to the newest few."""
@@ -726,12 +820,22 @@ def _purge_runs() -> None:
             _RUNS.pop(rid, None)
 
 
-def start_run(runner: Any, query: str) -> str:
-    """Begin a pipeline run in the background; returns its id."""
+def start_run(runner: Any, query: str, session: str = "") -> str:
+    """Begin a pipeline run in the background; returns its id.
+
+    `query` is what the reader typed and what the payload will carry. `session`
+    names the conversation the question belongs to; if it has earlier resolved
+    turns, they are folded into the prompt the pipeline actually receives.
+    """
     run_id = uuid.uuid4().hex[:12]
+    turns = _session_turns(session)
+    prompt = build_prompt(query, turns)
     rec = {
         "id": run_id,
         "query": query,
+        "prompt": prompt,
+        "turns": len(turns),
+        "session": session,
         "lines": [],
         "state": "running",
         "result": None,
@@ -748,8 +852,10 @@ def start_run(runner: Any, query: str) -> str:
 
     def work() -> None:
         try:
+            if rec["turns"]:
+                sink(f"[context] carrying {rec['turns']} earlier turn(s) from this conversation")
             with _RUN_GATE:
-                result, log, elapsed, error = runner.run(query, sink)
+                result, log, elapsed, error = runner.run(prompt, sink)
             with _RUN_LOCK:
                 if error is not None:
                     rec["state"] = "error"
@@ -759,6 +865,8 @@ def start_run(runner: Any, query: str) -> str:
                         query=query, result=result, run_log=log, total_seconds=elapsed
                     )
                     rec["state"] = "done"
+            if rec["state"] == "done" and rec["result"] is not None:
+                remember(session, query, rec["result"])
         except Exception as exc:  # never leave a run polling forever
             with _RUN_LOCK:
                 rec["state"] = "error"
