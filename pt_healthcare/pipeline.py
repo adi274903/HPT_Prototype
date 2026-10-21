@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import pandas as pd
 
 from . import config
-from . import events as ev
+from .parsing import split_reasoning
 from .pricing import sql_answer
 from .utils import clean_list
 from .vocabulary import column_vocabulary, drop_placeholders, resolve_to_vocabulary
@@ -74,34 +74,31 @@ class HealthcarePricingPipeline:
         return self._payers
 
     # ------------------------------------------------------------------
-    def run(
-        self,
-        user_query: str,
-        verbose: bool = True,
-        stream: Optional[Any] = None,
-    ) -> Dict[str, Any]:
-        """Run the full workflow and return a result dictionary.
+    def _speed(self) -> str:
+        """Tokens generated and decode rate, for the step that just ran.
 
-        Pass ``stream`` (a :class:`pt_healthcare.events.EventStream`) to receive
-        structured events as each stage produces its output. The log strings are
-        identical either way — the vendored UI parses them.
+        Latency alone cannot tell a slow model from a model that rambled: this says
+        which. Empty when the pipe does not report usage (the transformers path).
         """
+        pipe = getattr(getattr(self, "engine", None), "pipe", None)
+        usage = getattr(pipe, "last_usage", None) or {}
+        completion = int(usage.get("completion_tokens") or 0)
+        prompt = int(usage.get("prompt_tokens") or 0)
+        rate = getattr(pipe, "last_tokens_per_second", None)
+        if not completion and not prompt:
+            return ""
+        parts = [f" | {completion} generated", f"{prompt} prompt"]
+        if rate:
+            parts.append(f"{rate:.1f} tok/s")
+        return " (" + ", ".join(parts) + ")"
+
+    def run(self, user_query: str, verbose: bool = True) -> Dict[str, Any]:
+        """Run the full workflow and return a result dictionary."""
         pipeline_start = time.perf_counter()
 
         def log(message: str) -> None:
             if verbose:
                 self.printer(message)
-
-        def emit(event_type: str, **fields: Any) -> None:
-            """A structured event alongside the log lines.
-
-            The log lines only ever give a consumer a *timeline*: every block's
-            content is projected from this method's return value, so it arrives
-            only when the run ends. These events carry the same content the moment
-            a stage produces it.
-            """
-            if stream is not None:
-                stream.emit(event_type, **fields)
 
         def show_df(df: pd.DataFrame, label: str, max_rows: int = 5) -> None:
             if not verbose:
@@ -132,15 +129,9 @@ class HealthcarePricingPipeline:
         log("STEP 1/7 — Extracting medical, hospital, insurer, and medication entities")
         log(f"User query: {user_query}")
 
-        emit(ev.STAGE_STARTED, stage="entities", detail="Extracting entities")
-
         t0 = time.perf_counter()
 
-        raw_categorization = self.engine.categorize(
-            user_query,
-            hospitals=self.hospital_names(),
-            insurers=self.payer_names(),
-        )
+        raw_categorization = self.engine.categorize(user_query)
 
         log("\nRaw categorizer output:")
         log(repr(raw_categorization))
@@ -154,43 +145,11 @@ class HealthcarePricingPipeline:
         categorized.setdefault("insurer", [])
         categorized.setdefault("medication", [])
 
-        categorizer_attempts = 1
-
-        # The hospital and insurer categories are handed a closed set of real
-        # values; medical and medication are not. The model has repeatedly filled
-        # the two categories that have lists and returned `medical: []` for a query
-        # that plainly names a procedure — "Cost of colonoscopy at UPMC Presby?"
-        # came back as medical [] with the facility extracted correctly. Those runs
-        # also finished in ~2.5-2.9s with no reasoning trace, against 16-24s when
-        # the model reasoned and extracted correctly.
-        #
-        # So: when no procedure comes back, ask once more with the reference lists
-        # omitted — that list is the one variable that differs between the two
-        # categories, and the cost is ~3s against an answer built on the whole
-        # facility. This is a hypothesis being tested in production, not a proven
-        # fix, so it reports itself in the log and in the result.
-        if not categorized["medical"]:
-            log("\nNo medical entity extracted — retrying without the reference lists.")
-
-            raw_retry = self.engine.categorize(user_query)
-            retry = parse_json_output(raw_retry)
-
-            categorizer_attempts = 2
-
-            if retry.get("medical"):
-                log(f"Retry extracted: medical={retry['medical']}")
-                categorized["medical"] = retry["medical"]
-            else:
-                log("Retry extracted nothing either — continuing without a procedure.")
-
-        log(f"\nCategorization completed in {time.perf_counter() - t0:.2f}s")
+        log(f"\nCategorization completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
         log(f"Medical terms: {categorized['medical']}")
         log(f"Hospitals: {categorized['hospital']}")
         log(f"Insurers: {categorized['insurer']}")
         log(f"Medications: {categorized['medication']}")
-
-        emit(ev.STAGE_CONTENT, stage="entities", content=categorized)
-        emit(ev.STAGE_FINISHED, stage="entities")
 
         # ---------------------------------------------------------
         # 2. Retrieve CPT
@@ -198,20 +157,11 @@ class HealthcarePricingPipeline:
         log("\n" + "=" * 80)
         log("STEP 2/7 — Retrieving CPT candidates from Qdrant")
 
-        emit(ev.STAGE_STARTED, stage="cpt", detail="Retrieving CPT candidates")
-
         t0 = time.perf_counter()
 
         cpt_candidates = self.retriever.retrieve_cpt(categorized, top_k=self.top_k)
 
         log(f"CPT retrieval completed in {time.perf_counter() - t0:.2f}s")
-
-        emit(
-            ev.STAGE_CONTENT,
-            stage="cpt",
-            content=cpt_candidates.to_dict(orient="records"),
-        )
-        emit(ev.STAGE_FINISHED, stage="cpt")
         show_df(cpt_candidates, "Top CPT candidates:")
 
         # ---------------------------------------------------------
@@ -220,20 +170,11 @@ class HealthcarePricingPipeline:
         log("\n" + "=" * 80)
         log("STEP 3/7 — Retrieving HCPCS candidates from Qdrant")
 
-        emit(ev.STAGE_STARTED, stage="hcpcs", detail="Retrieving HCPCS candidates")
-
         t0 = time.perf_counter()
 
         hcpcs_candidates = self.retriever.retrieve_hcpcs(categorized, top_k=self.top_k)
 
         log(f"HCPCS retrieval completed in {time.perf_counter() - t0:.2f}s")
-
-        emit(
-            ev.STAGE_CONTENT,
-            stage="hcpcs",
-            content=hcpcs_candidates.to_dict(orient="records"),
-        )
-        emit(ev.STAGE_FINISHED, stage="hcpcs")
         show_df(hcpcs_candidates, "Top HCPCS candidates:")
 
         # ---------------------------------------------------------
@@ -241,8 +182,6 @@ class HealthcarePricingPipeline:
         # ---------------------------------------------------------
         log("\n" + "=" * 80)
         log("STEP 4/7 — Asking decision model to select relevant candidate codes")
-
-        emit(ev.STAGE_STARTED, stage="decision", detail="Selecting candidate codes")
 
         decision_context: Mapping[str, Any] = {
             **categorized,
@@ -262,20 +201,15 @@ class HealthcarePricingPipeline:
 
         output = parse_json_output(raw_output)
 
-        log(f"\nDecision completed in {time.perf_counter() - t0:.2f}s")
+        log(f"\nDecision completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
         log("Unvalidated decision:")
         log(str(output))
-
-        emit(ev.STAGE_CONTENT, stage="decision", content=output)
-        emit(ev.STAGE_FINISHED, stage="decision")
 
         # ---------------------------------------------------------
         # 5. Validate codes
         # ---------------------------------------------------------
         log("\n" + "=" * 80)
         log("STEP 5/7 — Validating selected codes against Qdrant candidates")
-
-        emit(ev.STAGE_STARTED, stage="validation", detail="Validating selected codes")
 
         t0 = time.perf_counter()
 
@@ -334,17 +268,13 @@ class HealthcarePricingPipeline:
                 f"{rejected_hcpcs}"
             )
 
-        emit(
-            ev.STAGE_CONTENT,
-            stage="validation",
-            content={
-                "cpt_list": output["cpt_list"],
-                "hcpcs_list": output["hcpcs_list"],
-                "rejected_cpt": rejected_cpt,
-                "rejected_hcpcs": rejected_hcpcs,
-            },
-        )
-        emit(ev.STAGE_FINISHED, stage="validation")
+        # ---------------------------------------------------------
+        # 6. Filter UPMC MRF
+        # ---------------------------------------------------------
+        log("\n" + "=" * 80)
+        log("STEP 6/7 — Filtering UPMC MRF data by selected codes, payer, and hospital")
+
+        t0 = time.perf_counter()
 
         # ---------------------------------------------------------
         # Correct the model's entity names, before they become filters.
@@ -399,13 +329,6 @@ class HealthcarePricingPipeline:
             log("rather than presenting unrelated prices as an answer.")
             log("=" * 80)
 
-            emit(
-                ev.STAGE_CONTENT,
-                stage="mrf",
-                content={"stopped": "nothing_to_filter", "match_count": 0},
-            )
-            emit(ev.STAGE_FINISHED, stage="mrf")
-
             answer = (
                 "I could not identify a medical service or procedure in that "
                 "question, so there is nothing to price.\n\n"
@@ -435,19 +358,8 @@ class HealthcarePricingPipeline:
                 },
                 "answer": answer,
                 "total_seconds": total_time,
-                "categorizer_attempts": categorizer_attempts,
                 "stopped": "nothing_to_filter",
             }
-
-        # ---------------------------------------------------------
-        # 6. Filter UPMC MRF
-        # ---------------------------------------------------------
-        log("\n" + "=" * 80)
-        log("STEP 6/7 — Filtering UPMC MRF data by selected codes, payer, and hospital")
-
-        emit(ev.STAGE_STARTED, stage="mrf", detail="Filtering the price file")
-
-        t0 = time.perf_counter()
 
         code_plausible = sql_answer(
             cpt_list=output["cpt_list"],
@@ -458,18 +370,6 @@ class HealthcarePricingPipeline:
         )
 
         log(f"MRF filtering completed in {time.perf_counter() - t0:.2f}s")
-
-        if isinstance(code_plausible, dict):
-            emit(
-                ev.STAGE_CONTENT,
-                stage="mrf",
-                content={
-                    "filters_used": code_plausible.get("filters_used"),
-                    "match_count": code_plausible.get("match_count"),
-                },
-            )
-
-        emit(ev.STAGE_FINISHED, stage="mrf")
 
         if isinstance(code_plausible, dict):
             match_count = code_plausible.get("match_count", "unknown")
@@ -511,8 +411,6 @@ class HealthcarePricingPipeline:
         log("\n" + "=" * 80)
         log("STEP 7/7 — Generating final user-facing answer")
 
-        emit(ev.STAGE_STARTED, stage="answer", detail="Writing the answer")
-
         t0 = time.perf_counter()
 
         answer = self.engine.answer(
@@ -520,13 +418,16 @@ class HealthcarePricingPipeline:
             output=output,
             code_plausible=code_plausible,
         )
+        # MedGemma prefixes the answer with a <unused94>thought ... <unused95>
+        # block. It is scratchpad, not an answer — keep it for the Thinking
+        # tab, never in the text a patient reads.
+        reasoning, answer = split_reasoning(answer)
 
-        log(f"Answer generation completed in {time.perf_counter() - t0:.2f}s")
+        log(f"Answer generation completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
+        if reasoning:
+            log(f"({len(reasoning)} characters of model reasoning set aside)")
         log("\nFINAL ANSWER:")
         log(str(answer))
-
-        emit(ev.STAGE_CONTENT, stage="answer", content={"answer": answer})
-        emit(ev.STAGE_FINISHED, stage="answer")
 
         total_time = time.perf_counter() - pipeline_start
 
@@ -541,8 +442,8 @@ class HealthcarePricingPipeline:
             "output": output,
             "code_plausible": code_plausible,
             "answer": answer,
+            "reasoning": reasoning,
             "total_seconds": total_time,
-            "categorizer_attempts": categorizer_attempts,
         }
 
 

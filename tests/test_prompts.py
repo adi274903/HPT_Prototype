@@ -4,7 +4,6 @@ from pt_healthcare.prompts import (
     build_answer_prompt,
     build_categorizer_prompt,
     build_decision_prompt,
-    build_general_prompt,
 )
 
 
@@ -19,32 +18,12 @@ def test_categorizer_prompt_embeds_query_and_schema():
     assert "Return ONLY valid JSON" in prompt
 
 
-def test_categorizer_prompt_includes_known_values_when_given():
-    prompt = build_categorizer_prompt(
-        "colonsocopy with my Higmark BCBS plan",
-        hospitals=["Upmc Presbyterian Shadyside"],
-        insurers=["Highmark BCBS of PA"],
-    )
-
-    assert "- Highmark BCBS of PA" in prompt
-    assert "- Upmc Presbyterian Shadyside" in prompt
-    assert "hospitals (1):" in prompt
-    assert "insurers (1):" in prompt
-    assert "colonsocopy with my Higmark BCBS plan" in prompt
-
-
-def test_categorizer_prompt_is_unchanged_without_known_values():
-    """No MRF means the prompt is byte-identical to the prototype's."""
-    assert build_categorizer_prompt("q") == build_categorizer_prompt("q", [], [])
-    assert "Known entries" not in build_categorizer_prompt("q")
-
-
 def test_categorizer_prompt_no_longer_asks_for_generic_references():
     """It used to say: include generic references such as "my hospital"."""
     prompt = build_categorizer_prompt("q")
 
     assert "Include generic references" not in prompt
-    assert "Never emit a generic word" in prompt
+    assert "Never emit a bare category word" in prompt
 
 
 def test_categorizer_prompt_shows_a_query_that_names_no_facility():
@@ -52,9 +31,26 @@ def test_categorizer_prompt_shows_a_query_that_names_no_facility():
     prompt = build_categorizer_prompt("q")
 
     assert "Which hospital should I go to for a colonoscopy?" in prompt
-    assert "Asking *which*" in prompt
+    assert "A query asking which hospital to" in prompt
     # The old example taught that "Houston Hospital" is a hospital entity.
     assert "Houston Hospital" not in prompt
+
+
+def test_categorizer_prompt_stays_small():
+    """A budget, so the size cannot creep back.
+
+    The prompt carried the whole hospital and payer vocabulary inline — roughly 280
+    tokens of names — and with two categories holding a list and two not, the model
+    filled the listed ones and returned an empty medical category. The names are no
+    longer needed there at all: ``resolve_to_vocabulary()`` maps a near miss onto
+    the real entry ("UPMC Presby" -> "Upmc Presbyterian Shadyside").
+    """
+    prompt = build_categorizer_prompt("Cost of colonoscopy at UPMC Presby?")
+
+    assert len(prompt) < 2200, f"categorizer prompt is {len(prompt)} chars"
+    # Four worked examples plus the query under test.
+    assert prompt.count("Query: ") == 5
+    assert prompt.count("\n") < 60
 
 
 def test_every_model_call_sets_an_explicit_token_budget():
@@ -70,31 +66,39 @@ def test_every_model_call_sets_an_explicit_token_budget():
 
     source = inspect.getsource(MedGemmaEngine)
 
-    assert source.count("max_new_tokens=config.max_new_tokens()") == 5, (
-        "categorize/decide/answer/classify_intent/explain must all pass a budget"
-    )
-    assert config.max_new_tokens() > 256
+    for step in ("categorize", "decide", "answer"):
+        assert f'max_new_tokens=config.max_new_tokens("{step}")' in source, (
+            f"{step} must pass its own budget, not the shared 4096 default"
+        )
+    # Bounded, but still room for a thought block plus the JSON.
+    assert 256 < config.max_new_tokens("categorize") <= 1024
+    assert 128 < config.max_new_tokens("decide") <= 1024
+    assert config.max_new_tokens("answer") <= 2048
 
 
-def test_categorizer_prompt_scopes_the_reference_lists():
-    """The lists must not read as a whitelist for medical or medication.
+def test_categorizer_prompt_is_unchanged_without_known_values():
+    """Kept as a guard: there is no second prompt shape any more.
 
-    Regression: with the lists present, "What might a diagnostic mammogram cost
-    at UPMC Presbyterian with UPMC Health Plan?" came back with ``medical: []``.
-    The two categories that had lists were filled; the one without was not.
+    The vocabulary variant was removed, so this now asserts the signature takes no
+    vocabulary at all — a caller passing one gets a TypeError rather than silently
+    different output.
     """
-    prompt = build_categorizer_prompt("q", ["Upmc Altoona"], ["Aetna"])
+    import pytest
 
-    assert "hospital and insurer categories ONLY" in prompt
-    assert "restrict the medical or medication categories" in prompt
+    assert build_categorizer_prompt("q") == build_categorizer_prompt("q")
+
+    with pytest.raises(TypeError):
+        build_categorizer_prompt("q", ["Upmc Altoona"], ["Aetna"])
 
 
 def test_categorizer_prompt_shows_a_fully_populated_price_query():
-    """The regression query, taught as a worked example."""
+    """The multi-entity case, taught as a worked example."""
     prompt = build_categorizer_prompt("q")
 
-    assert '"medical": ["diagnostic mammogram"]' in prompt
-    assert "Every category is filled from the query text." in prompt
+    assert (
+        '"medical": ["MRI"], "hospital": ["Houston Methodist"], '
+        '"insurer": ["Blue Cross"]' in prompt
+    )
 
 
 def test_every_model_call_is_deterministic():
@@ -109,31 +113,9 @@ def test_every_model_call_is_deterministic():
 
     source = inspect.getsource(MedGemmaEngine)
 
-    assert source.count("do_sample=False") == 5, (
-        "every model call must be deterministic"
+    assert source.count("do_sample=False") == 3, (
+        "categorize/decide/answer must all be deterministic"
     )
-
-
-def test_intent_prompt_offers_every_tool():
-    """It used to offer only price and lookup, so 'explain' was unreachable."""
-    from pt_healthcare.prompts import build_intent_prompt
-
-    prompt = build_intent_prompt("what is a colonoscopy?")
-
-    for tool in ("price", "lookup", "explain"):
-        assert tool in prompt
-
-    assert "exactly one word" in prompt
-    assert "what is a colonoscopy?" in prompt
-
-
-def test_general_prompt_says_no_lookup_happened():
-    """The model must not imply it searched when it did not."""
-    prompt = build_general_prompt("what is a colonoscopy?")
-
-    assert "No index lookup was performed" in prompt
-    assert "Never guess or assert a specific billing code" in prompt
-    assert "what is a colonoscopy?" in prompt
 
 
 def test_decision_prompt_compacts_and_serializes_candidates():
@@ -156,6 +138,21 @@ def test_decision_prompt_compacts_and_serializes_candidates():
     # The duplicate was removed by compact_candidates.
     assert prompt.count('"code": "77065"') == 1
     assert '"use_codes": "cpt"' in prompt
+
+
+def test_categorizer_prompt_covers_the_terse_cost_phrasing():
+    """The two reported failures, neither of which resembled any other example.
+
+    "Cost of colonoscopy at UPMC Presby?" and "How much would an X-ray cost?" both
+    came back with an empty medical list, while the full-sentence examples — and a
+    query matching one verbatim — extracted correctly. The prompt now shows the
+    terse shape.
+    """
+    prompt = build_categorizer_prompt("q")
+
+    assert '"medical": ["colonoscopy"]' in prompt
+    assert '"medical": ["X-ray"]' in prompt
+    assert "short or clipped phrase still counts" in prompt
 
 
 def test_decision_prompt_caps_candidates_at_eight():
@@ -185,3 +182,34 @@ def test_answer_prompt_includes_query_output_and_candidates():
     assert "45378" in prompt
     assert "95" in prompt
     assert "Answer:" in prompt
+
+
+def test_the_answer_prompt_sends_a_few_rows_not_the_whole_dump():
+    """The answer step used to receive the pipeline dump: ~8,000 prompt tokens."""
+    import pandas as pd
+
+    from pt_healthcare.prompts import build_answer_prompt
+
+    rows = pd.DataFrame([
+        {
+            "row_id": f"r{index}",
+            "hospital_name": "UPMC Presbyterian",
+            "payer_name": "UPMC Health Plan",
+            "plan_name": "PPO",
+            "CPT": "77065",
+            "standard_charge|negotiated_dollar": 100.0 + index,
+            "standard_charge|discounted_cash": 200.0,
+            "standard_charge|gross": 450.0,
+        }
+        for index in range(40)
+    ])
+
+    prompt = build_answer_prompt(
+        "What does a diagnostic mammogram cost?",
+        {"cpt_candidates": [{"code": "77065", "description": "x" * 200}] * 20},
+        {"cpt_list": ["77065"], "price_summary": rows},
+    )
+
+    assert len(prompt) < 3000, len(prompt)
+    assert "negotiated $100.00" in prompt
+    assert prompt.count("row r") == 12

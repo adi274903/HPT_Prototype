@@ -15,9 +15,6 @@ from .prompts import (
     build_answer_prompt,
     build_categorizer_prompt,
     build_decision_prompt,
-    build_explain_prompt,
-    build_general_prompt,
-    build_intent_prompt,
 )
 
 
@@ -30,27 +27,20 @@ class MedGemmaEngine:
     # ------------------------------------------------------------------
     # 1. Entity extraction  (notebook cell 15)
     # ------------------------------------------------------------------
-    def categorize(
-        self,
-        user_query: str,
-        hospitals: Optional[Sequence[str]] = None,
-        insurers: Optional[Sequence[str]] = None,
-    ) -> str:
+    def categorize(self, user_query: str) -> str:
         """Run the categorizer prompt and return the raw assistant text.
 
-        ``hospitals`` / ``insurers`` are the known values from the published price
-        file; passing them makes extraction a choice from a closed set instead of
-        free invention.
+        No vocabulary is injected. The known hospital and payer names used to be
+        listed inline — about 280 tokens — which made the model fill the two
+        categories that had a list and return ``medical: []`` for a query that
+        plainly named a procedure. ``vocabulary.resolve_to_vocabulary()`` does that
+        mapping after the fact instead, so the prompt does not have to carry it.
 
-        ``max_new_tokens`` is passed explicitly. The pipe's own default is 256,
-        and MedGemma is a thinking model: it emits ``<unused94>thought …`` before
-        the JSON, so a verbosely-reasoned query can spend the entire budget on the
-        thought block and get cut off before any JSON exists — surfacing later as
-        "Could not find a JSON object in the model response". The prototype hit
-        this too: its log shows ``max_new_tokens (=256)`` for this call and
-        ``(=4096)`` for the other two.
+        ``max_new_tokens`` is passed explicitly. MedGemma is a thinking model, and
+        the pipe's own default of 256 went entirely on the <unused94>thought block
+        before any JSON existed.
         """
-        prompt = build_categorizer_prompt(user_query, hospitals, insurers)
+        prompt = build_categorizer_prompt(user_query)
 
         messages = [
             {
@@ -63,7 +53,7 @@ class MedGemmaEngine:
 
         output = self.pipe(
             text=messages,
-            max_new_tokens=config.max_new_tokens(),
+            max_new_tokens=config.max_new_tokens("categorize"),
             do_sample=False,
         )
 
@@ -85,7 +75,7 @@ class MedGemmaEngine:
 
         output = self.pipe(
             messages,
-            max_new_tokens=config.max_new_tokens(),
+            max_new_tokens=config.max_new_tokens("decide"),
             do_sample=False,
             return_full_text=True,
         )
@@ -117,63 +107,8 @@ class MedGemmaEngine:
 
         output_ = self.pipe(
             text=messages,
-            max_new_tokens=config.max_new_tokens(),
+            max_new_tokens=config.max_new_tokens("answer"),
             do_sample=False,
         )
 
         return output_[0]["generated_text"][-1]["content"]
-
-    # ------------------------------------------------------------------
-    # 4. Tool selection  (see router.py - the tie-breaker, not the router)
-    # ------------------------------------------------------------------
-    def classify_intent(self, user_query: str) -> str:
-        """Ask the model which tool fits, for the cases rules cannot settle."""
-        prompt = build_intent_prompt(user_query)
-
-        messages = [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": f"{prompt}"}],
-            },
-        ]
-
-        output = self.pipe(
-            text=messages,
-            max_new_tokens=config.max_new_tokens(),
-            do_sample=False,
-        )
-
-        return output[0]["generated_text"][-1]["content"]
-
-    # ------------------------------------------------------------------
-    # 5. Explanation  (code definitions and general procedure questions)
-    # ------------------------------------------------------------------
-    def explain(self, user_query: str, context: Optional[str] = None) -> str:
-        """Explain a code, or answer a general question.
-
-        ``context`` is the retrieved descriptor text when the query named a code:
-        the answer is grounded in it and the prompt forbids describing a code the
-        index does not hold. Pass ``None`` for a general question — no lookup
-        happened, and the prompt says so, so the model answers from its own
-        clinical knowledge instead of claiming to have searched.
-        """
-        prompt = (
-            build_general_prompt(user_query)
-            if context is None
-            else build_explain_prompt(user_query, context)
-        )
-
-        messages = [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": f"{prompt}"}],
-            },
-        ]
-
-        output = self.pipe(
-            text=messages,
-            max_new_tokens=config.max_new_tokens(),
-            do_sample=False,
-        )
-
-        return output[0]["generated_text"][-1]["content"]
