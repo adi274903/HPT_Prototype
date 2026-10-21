@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from . import config
 
-__all__ = ["parse_json_output", "compact_candidates", "split_reasoning"]
+__all__ = ["parse_json_output", "compact_candidates", "recover_selection",
+           "split_reasoning"]
 
 _THOUGHT_OPEN = re.compile(r"<unused94>", re.IGNORECASE)
 _THOUGHT_CLOSE = re.compile(r"<unused95>", re.IGNORECASE)
@@ -170,6 +171,48 @@ def parse_json_output(raw_output: Any) -> Dict[str, Any]:
         "Could not find a JSON object in the model response.\n\n"
         f"Raw model output:\n{raw_output}"
     )
+
+
+#: A bare CPT (5 digits) or HCPCS Level II (letter + 4 digits) token.
+_CODE_TOKEN = re.compile(r"\b(?:[0-9]{5}|[A-Z][0-9]{4})\b")
+
+
+def recover_selection(
+    raw_output: str,
+    cpt_codes: Iterable[str],
+    hcpcs_codes: Iterable[str],
+    limit: int = 5,
+) -> Optional[Dict[str, Any]]:
+    """Salvage a code decision from a decision step that never emitted JSON.
+
+    MedGemma thinks before it answers, and the thought can spend the whole token
+    budget enumerating candidates — the JSON then never arrives. Everything it
+    named is still in the text, and a code is only usable if retrieval offered it,
+    so the salvage is the intersection: codes mentioned **and** retrieved, in the
+    order mentioned, capped like the model's own answer.
+
+    Returns ``None`` when the text names nothing that was retrieved. Then there is
+    no decision to recover, and inventing one would be worse than saying so.
+    """
+    text = (raw_output or "").upper()
+
+    offered_cpt = {str(code).strip().upper() for code in cpt_codes}
+    offered_hcpcs = {str(code).strip().upper() for code in hcpcs_codes}
+
+    mentioned = list(dict.fromkeys(_CODE_TOKEN.findall(text)))
+    cpt = [code for code in mentioned if code in offered_cpt][:limit]
+    hcpcs = [code for code in mentioned if code in offered_hcpcs][:limit]
+
+    if not cpt and not hcpcs:
+        return None
+
+    if cpt and hcpcs:
+        use_codes = "both"
+    else:
+        use_codes = "cpt" if cpt else "hcpcs"
+
+    return {"use_codes": use_codes, "cpt_list": cpt, "hcpcs_list": hcpcs,
+            "recovered": True}
 
 
 def compact_candidates(

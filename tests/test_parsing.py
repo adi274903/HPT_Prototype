@@ -1,6 +1,11 @@
 import pytest
 
-from pt_healthcare.parsing import compact_candidates, parse_json_output, split_reasoning
+from pt_healthcare.parsing import (
+    compact_candidates,
+    parse_json_output,
+    recover_selection,
+    split_reasoning,
+)
 
 
 def test_parse_plain_json():
@@ -127,3 +132,34 @@ def test_strip_thought_is_the_answer_half_of_split_reasoning():
     raw = "<unused94>thought: weigh it up<unused95>It depends on your plan."
     assert strip_thought(raw) == "It depends on your plan."
     assert strip_thought(raw) == split_reasoning(raw)[1]
+
+
+# ---------------------------------------------------------------------------
+# recover_selection: the salvage rule for a decision step that ran out of budget
+# ---------------------------------------------------------------------------
+def test_recover_selection_keeps_only_retrieved_codes():
+    raw = "<unused94>thought\n45378 colonoscopy, 45367 polypectomy, 77065 mammogram"
+    salvaged = recover_selection(raw, {"77065"}, set())
+    assert salvaged["cpt_list"] == ["77065"]
+    assert salvaged["use_codes"] == "cpt"
+    assert salvaged["recovered"] is True
+
+
+def test_recover_selection_reports_both_families():
+    salvaged = recover_selection("77065 and G0206", {"77065"}, {"G0206"})
+    assert salvaged["use_codes"] == "both"
+    assert salvaged["cpt_list"] == ["77065"] and salvaged["hcpcs_list"] == ["G0206"]
+
+
+def test_recover_selection_dedupes_and_caps():
+    raw = "77065 " * 4 + "76090 76091 76092 76093 76094 76095"
+    offered = {"77065", "76090", "76091", "76092", "76093", "76094", "76095"}
+    salvaged = recover_selection(raw, offered, set(), limit=5)
+    assert salvaged["cpt_list"][0] == "77065"
+    assert len(salvaged["cpt_list"]) == 5
+    assert len(set(salvaged["cpt_list"])) == 5
+
+
+def test_recover_selection_returns_none_when_nothing_was_offered():
+    assert recover_selection("I am not sure what you mean", {"77065"}, set()) is None
+    assert recover_selection("45378 and 99999", {"77065"}, set()) is None
