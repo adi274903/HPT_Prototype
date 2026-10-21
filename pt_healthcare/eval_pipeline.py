@@ -489,10 +489,14 @@ def generate(*, pipeline: Optional[Any] = None, engine: Optional[RecordingEngine
                       "answer": "", "total_seconds": time.perf_counter() - started}
         if intent_client is not None:
             try:
+                from . import config
                 from .prompts import build_intent_prompt
 
-                reply = intent_client.complete(build_intent_prompt(case["eval_query"]),
-                                               max_tokens=8)
+                intent_prompt = build_intent_prompt(case["eval_query"])
+                # A thinking model spends the first tokens on <unused94>thought;
+                # 8 guaranteed only "thought", never the label.
+                reply = intent_client.complete(
+                    intent_prompt, max_tokens=config.max_new_tokens("intent", intent_prompt))
                 text = (getattr(reply, "text", "") or "").strip()
                 if text:
                     result = dict(result)
