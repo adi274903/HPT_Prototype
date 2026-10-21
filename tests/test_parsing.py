@@ -119,3 +119,11 @@ def test_split_reasoning_handles_a_bare_closer():
 def test_split_reasoning_survives_missing_or_odd_input():
     assert split_reasoning(None) == ("", "")
     assert split_reasoning("") == ("", "")
+
+
+def test_strip_thought_is_the_answer_half_of_split_reasoning():
+    from pt_healthcare.parsing import split_reasoning, strip_thought
+
+    raw = "<unused94>thought: weigh it up<unused95>It depends on your plan."
+    assert strip_thought(raw) == "It depends on your plan."
+    assert strip_thought(raw) == split_reasoning(raw)[1]
