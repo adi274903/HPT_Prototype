@@ -451,10 +451,12 @@ class EmbeddingRetriever:
                  device: Optional[str] = None) -> None:
         from . import config
         from .data import get_qdrant_client
-        from .models import load_models
+        from .models import load_embedder
         from .retrieval import CodeRetriever
 
-        _, embed_model = load_models(device=device)
+        # Only the embedder: load_models() would build the 4B generator in transformers
+        # too, and the eval already holds those weights in vLLM on the same card.
+        embed_model = load_embedder()
         self.retriever = CodeRetriever(embed_model, get_qdrant_client(qdrant_path), top_k=top_k)
         self.collections = {"CPT": config.cpt_collection(), "HCPCS": config.hcpcs_collection()}
 
@@ -556,12 +558,14 @@ class Runner:
             "eval_id": case["eval_id"], "subtype": target.get("subtype"),
             "intent_target": target.get("intent"), "n_rows_gt": len(truth_rows),
             "n_codes_gt": len(truth_codes_mrf),
-            "parse_failures": [], "latency_ms": {},
+            "parse_failures": [], "errors": [], "latency_ms": {},
         }
 
         # 1. intent -----------------------------------------------------------
         intent_completion = self.client.complete(build_intent_prompt(query), max_tokens=64)
         record["latency_ms"]["intent"] = intent_completion.latency_ms
+        if intent_completion.error:
+            record["errors"].append("intent: " + intent_completion.error)
         predicted_intent = parse_intent(intent_completion.text)
         if predicted_intent not in INTENT_LABELS:
             record["parse_failures"].append("intent")
@@ -571,6 +575,8 @@ class Runner:
         # 2. entity extraction ------------------------------------------------
         extraction = self.client.complete(build_categorizer_prompt(query), max_tokens=256)
         record["latency_ms"]["extract"] = extraction.latency_ms
+        if extraction.error:
+            record["errors"].append("extract: " + extraction.error)
         categorized = safe_parse(extraction.text)
         if not categorized:
             record["parse_failures"].append("extract")
@@ -601,6 +607,8 @@ class Runner:
                             "cpt_candidates": candidate_cpt, "hcpcs_candidates": candidate_hcpcs}
         decision = self.client.complete(build_decision_prompt(decision_context, query), max_tokens=256)
         record["latency_ms"]["decide"] = decision.latency_ms
+        if decision.error:
+            record["errors"].append("decide: " + decision.error)
         decided = safe_parse(decision.text)
         if not decided:
             record["parse_failures"].append("decide")
@@ -627,6 +635,8 @@ class Runner:
         answer = self.client.complete(build_answer_prompt(query, {"cpt_list": predicted_codes}, answer_input),
                                       max_tokens=400)
         record["latency_ms"]["answer"] = answer.latency_ms
+        if answer.error:
+            record["errors"].append("answer: " + answer.error)
         text = final_answer(answer.text)
         if not text:
             record["parse_failures"].append("answer")
@@ -847,6 +857,10 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
         },
         "ops": {
             "parse_failure_rate": ratio(sum(1 for record in records if record["parse_failures"]), len(records)),
+            # Empty generation is an infrastructure failure, not a model miss; without this
+            # the run reads as "the model scored 0" when in fact nothing was generated.
+            "generation_error_cases": sum(1 for record in records if record.get("errors")),
+            "generation_errors": _error_counts(records),
             "parse_failures_by_step": {
                 step: sum(1 for record in records if step in record["parse_failures"])
                 for step in ("intent", "extract", "decide", "answer")},
@@ -856,6 +870,20 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
             "tokens": {"prompt": meta.get("prompt_tokens"), "completion": meta.get("completion_tokens")},
         },
     }
+
+
+def _error_counts(records):
+    """How many cases each generation error hit, keyed by a truncated message."""
+    counts = {}
+    for record in records:
+        seen = set()
+        for entry in record.get("errors") or []:
+            key = entry.split(": ", 1)[-1][:160]
+            if key in seen:
+                continue
+            seen.add(key)
+            counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: -item[1]))
 
 
 def format_report(report: Mapping[str, Any]) -> str:
@@ -923,6 +951,11 @@ def format_report(report: Mapping[str, Any]) -> str:
     lines.append("OPS")
     lines.append(f"  cases with a parse failure: {pct(report['ops']['parse_failure_rate'])}")
     lines.append(f"  by step: {report['ops']['parse_failures_by_step']}")
+    if report["ops"].get("generation_error_cases"):
+        lines.append(f"  GENERATION FAILED in {report['ops']['generation_error_cases']} case(s) "
+                     "\u2014 not model errors: nothing was produced at all:")
+        for message, count in report["ops"]["generation_errors"].items():
+            lines.append(f"    x{count} {message}")
     for step, block in report["ops"]["latency_ms"].items():
         lines.append(f"  {step:<7} mean {num((block['mean'] or 0) / 1000)}s  p95 {num((block['p95'] or 0) / 1000)}s")
     return "\n".join(lines)
