@@ -150,8 +150,111 @@ Required JSON:
 }}"""
 
 
+_ANSWER_ROW_FIELDS = (
+    ("row_id", "row"),
+    ("CPT", "CPT"),
+    ("HCPCS", "HCPCS"),
+    ("hospital_name", "hospital"),
+    ("payer_name", "payer"),
+    ("plan_name", "plan"),
+    ("standard_charge|negotiated_dollar", "negotiated"),
+    ("standard_charge|discounted_cash", "cash"),
+    ("standard_charge|gross", "gross"),
+)
+
+
+def _records(value: Any) -> List[Dict[str, Any]]:
+    """Rows from a DataFrame or a list of dicts, without importing pandas here."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if hasattr(value, "to_dict"):
+        try:
+            return list(value.to_dict(orient="records"))
+        except TypeError:
+            return []
+    return []
+
+
+def _money(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"${number:,.2f}"
+
+
+def build_answer_context(
+    output: Any,
+    code_plausible: Any,
+    *,
+    max_rows: int = 12,
+    max_candidates: int = 8,
+) -> str:
+    """A compact, grounded context for the answer step.
+
+    The step used to receive the entire pipeline dump — every candidate and every
+    matched MRF row with all nineteen columns — which cost about 8,000 prompt tokens
+    before the model generated anything. The answer only needs a handful of rows and
+    the codes that were chosen, one line each.
+    """
+    lines: List[str] = []
+
+    chosen: List[str] = []
+    plausible = code_plausible if isinstance(code_plausible, Mapping) else {}
+    for family in ("cpt_list", "hcpcs_list", "codes"):
+        for code in plausible.get(family) or []:
+            text = str(code).strip()
+            if text and text not in chosen:
+                chosen.append(text)
+    if not chosen and isinstance(output, Mapping):
+        for family in ("cpt_list", "hcpcs_list"):
+            for code in output.get(family) or []:
+                text = str(code).strip()
+                if text and text not in chosen:
+                    chosen.append(text)
+
+    if chosen:
+        lines.append("Codes under consideration: " + ", ".join(chosen[:max_candidates]))
+
+    if plausible and plausible.get("match_count") is not None:
+        lines.append(f"Rows matched before the display cap: {plausible['match_count']}")
+
+    rows = _records(plausible.get("price_summary") if plausible else None)
+    if not rows:
+        rows = _records(output.get("matches") if isinstance(output, Mapping) else None)
+
+    priced = [row for row in rows if row.get("standard_charge|negotiated_dollar")]
+    unpriced = [row for row in rows if not row.get("standard_charge|negotiated_dollar")]
+    selected = (priced + unpriced)[:max_rows]
+
+    if not selected:
+        lines.append("No priced rows matched for this query.")
+    else:
+        lines.append(f"Published price rows ({len(selected)} of {len(rows)}):")
+        for row in selected:
+            parts = []
+            for key, label in _ANSWER_ROW_FIELDS:
+                value = row.get(key)
+                if value is None or (isinstance(value, float) and value != value):
+                    continue
+                text = _money(value) if "|" in key or key == "median_amount" else str(value).strip()
+                if text:
+                    parts.append(f"{label} {text}")
+            if parts:
+                lines.append(" | ".join(parts))
+
+    return "\n".join(lines)
+
+
 def build_answer_prompt(user_query: str, output: Any, code_plausible: Any) -> str:
-    """Patient-facing answer prompt grounded in the matched MRF rows."""
+    """Patient-facing answer prompt grounded in the matched MRF rows.
+
+    The context is compacted here rather than in the caller so every path — UI,
+    CLI, eval — pays the same small prompt.
+    """
+    context = build_answer_context(output, code_plausible)
     return f"""You are a helpful healthcare navigation assistant.
 
     Answer the user's question using the original question, extracted entities, and
@@ -174,11 +277,7 @@ def build_answer_prompt(user_query: str, output: Any, code_plausible: Any) -> st
     User query:
     {user_query}
 
-    Extracted entities:
-    {output}
-
-    Entity-linked code candidates:
-    {code_plausible}
+    {context}
 
     Answer:
     """

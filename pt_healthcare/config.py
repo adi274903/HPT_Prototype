@@ -166,7 +166,29 @@ def candidate_text_limit() -> int:
     return _get_int("PT_CANDIDATE_TEXT_LIMIT", DEFAULT_CANDIDATE_TEXT_LIMIT)
 
 
-def max_new_tokens() -> int:
+#: Token budget per step. The single global default is 4096, and MedGemma is a
+#: thinking model: it can spend the whole budget on ``<unused94>thought`` before the
+#: JSON exists, which is where the UI's latency went. Each of these is generous for
+#: the step's real output plus a thought block, and each is overridable
+#: (``PT_MAX_NEW_TOKENS_CATEGORIZE`` / ``_DECIDE`` / ``_ANSWER``).
+DEFAULT_STEP_TOKENS: Dict[str, int] = {
+    "categorize": 768,
+    "decide": 512,
+    "answer": 1024,
+}
+
+
+def max_new_tokens(step: str = "") -> int:
+    """The generation budget, per step when a step name is given.
+
+    ``PT_MAX_NEW_TOKENS`` still sets the fallback for an unnamed step, so an
+    existing ``.env`` keeps working.
+    """
+    if step:
+        name = step.strip().upper()
+        default = DEFAULT_STEP_TOKENS.get(step.strip().lower(),
+                                          _get_int("PT_MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS))
+        return _get_int(f"PT_MAX_NEW_TOKENS_{name}", default)
     return _get_int("PT_MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS)
 
 

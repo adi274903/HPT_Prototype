@@ -74,6 +74,24 @@ class HealthcarePricingPipeline:
         return self._payers
 
     # ------------------------------------------------------------------
+    def _speed(self) -> str:
+        """Tokens generated and decode rate, for the step that just ran.
+
+        Latency alone cannot tell a slow model from a model that rambled: this says
+        which. Empty when the pipe does not report usage (the transformers path).
+        """
+        pipe = getattr(getattr(self, "engine", None), "pipe", None)
+        usage = getattr(pipe, "last_usage", None) or {}
+        completion = int(usage.get("completion_tokens") or 0)
+        prompt = int(usage.get("prompt_tokens") or 0)
+        rate = getattr(pipe, "last_tokens_per_second", None)
+        if not completion and not prompt:
+            return ""
+        parts = [f" | {completion} generated", f"{prompt} prompt"]
+        if rate:
+            parts.append(f"{rate:.1f} tok/s")
+        return " (" + ", ".join(parts) + ")"
+
     def run(self, user_query: str, verbose: bool = True) -> Dict[str, Any]:
         """Run the full workflow and return a result dictionary."""
         pipeline_start = time.perf_counter()
@@ -127,7 +145,7 @@ class HealthcarePricingPipeline:
         categorized.setdefault("insurer", [])
         categorized.setdefault("medication", [])
 
-        log(f"\nCategorization completed in {time.perf_counter() - t0:.2f}s")
+        log(f"\nCategorization completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
         log(f"Medical terms: {categorized['medical']}")
         log(f"Hospitals: {categorized['hospital']}")
         log(f"Insurers: {categorized['insurer']}")
@@ -183,7 +201,7 @@ class HealthcarePricingPipeline:
 
         output = parse_json_output(raw_output)
 
-        log(f"\nDecision completed in {time.perf_counter() - t0:.2f}s")
+        log(f"\nDecision completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
         log("Unvalidated decision:")
         log(str(output))
 
@@ -405,7 +423,7 @@ class HealthcarePricingPipeline:
         # tab, never in the text a patient reads.
         reasoning, answer = split_reasoning(answer)
 
-        log(f"Answer generation completed in {time.perf_counter() - t0:.2f}s")
+        log(f"Answer generation completed in {time.perf_counter() - t0:.2f}s{self._speed()}")
         if reasoning:
             log(f"({len(reasoning)} characters of model reasoning set aside)")
         log("\nFINAL ANSWER:")

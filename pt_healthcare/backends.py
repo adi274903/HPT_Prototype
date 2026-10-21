@@ -29,6 +29,7 @@ Both imports are lazy, so this module imports cleanly with neither installed.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 Messages = Union[str, Sequence[Mapping[str, Any]]]
@@ -86,7 +87,7 @@ class LlamaCppPipe:
         n_ctx: int = 8192,
         n_gpu_layers: int = -1,
         n_threads: Optional[int] = None,
-        n_batch: int = 512,
+        n_batch: int = 1024,
         verbose: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -97,15 +98,26 @@ class LlamaCppPipe:
 
         self.model_path = model_path
         self.last_usage: Dict[str, int] = {}
-        self._llm = Llama(
+        self.last_tokens_per_second: Optional[float] = None
+
+        settings = dict(
             model_path=model_path,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
             n_threads=n_threads or (os.cpu_count() or 4),
             n_batch=n_batch,
             verbose=verbose,
-            **kwargs,
         )
+        # Prefill and decode throughput. ``n_ubatch == n_batch`` is what makes a
+        # long prompt (the answer step embeds the whole pipeline trace) clear in one
+        # pass instead of dozens; flash attention keeps the KV read cheap. Both are
+        # keyword-only in newer llama-cpp builds, so fall back rather than fail on
+        # an older one.
+        speed = dict(n_ubatch=n_batch, flash_attn=True, offload_kqv=True)
+        try:
+            self._llm = Llama(**settings, **speed, **kwargs)
+        except TypeError:
+            self._llm = Llama(**settings, **kwargs)
 
     def __call__(
         self,
@@ -116,6 +128,7 @@ class LlamaCppPipe:
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
         payload = messages if messages is not None else text
+        started = time.perf_counter()
         out = self._llm.create_chat_completion(
             messages=to_openai_messages(payload or ""),
             max_tokens=max_new_tokens,
@@ -124,6 +137,10 @@ class LlamaCppPipe:
             **kwargs,
         )
         self.last_usage = out.get("usage") or {}
+        completion_tokens = int(self.last_usage.get("completion_tokens") or 0)
+        elapsed = time.perf_counter() - started
+        # Decode rate only: prompt tokens are prefill, and mixing them in hides both.
+        self.last_tokens_per_second = (completion_tokens / elapsed) if elapsed and completion_tokens else None
         return _shape(out["choices"][0]["message"]["content"] or "")
 
     def close(self) -> None:

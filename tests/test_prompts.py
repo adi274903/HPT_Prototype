@@ -66,10 +66,14 @@ def test_every_model_call_sets_an_explicit_token_budget():
 
     source = inspect.getsource(MedGemmaEngine)
 
-    assert source.count("max_new_tokens=config.max_new_tokens()") == 3, (
-        "categorize/decide/answer must all pass an explicit budget"
-    )
-    assert config.max_new_tokens() > 256
+    for step in ("categorize", "decide", "answer"):
+        assert f'max_new_tokens=config.max_new_tokens("{step}")' in source, (
+            f"{step} must pass its own budget, not the shared 4096 default"
+        )
+    # Bounded, but still room for a thought block plus the JSON.
+    assert 256 < config.max_new_tokens("categorize") <= 1024
+    assert 128 < config.max_new_tokens("decide") <= 1024
+    assert config.max_new_tokens("answer") <= 2048
 
 
 def test_categorizer_prompt_is_unchanged_without_known_values():
@@ -178,3 +182,34 @@ def test_answer_prompt_includes_query_output_and_candidates():
     assert "45378" in prompt
     assert "95" in prompt
     assert "Answer:" in prompt
+
+
+def test_the_answer_prompt_sends_a_few_rows_not_the_whole_dump():
+    """The answer step used to receive the pipeline dump: ~8,000 prompt tokens."""
+    import pandas as pd
+
+    from pt_healthcare.prompts import build_answer_prompt
+
+    rows = pd.DataFrame([
+        {
+            "row_id": f"r{index}",
+            "hospital_name": "UPMC Presbyterian",
+            "payer_name": "UPMC Health Plan",
+            "plan_name": "PPO",
+            "CPT": "77065",
+            "standard_charge|negotiated_dollar": 100.0 + index,
+            "standard_charge|discounted_cash": 200.0,
+            "standard_charge|gross": 450.0,
+        }
+        for index in range(40)
+    ])
+
+    prompt = build_answer_prompt(
+        "What does a diagnostic mammogram cost?",
+        {"cpt_candidates": [{"code": "77065", "description": "x" * 200}] * 20},
+        {"cpt_list": ["77065"], "price_summary": rows},
+    )
+
+    assert len(prompt) < 3000, len(prompt)
+    assert "negotiated $100.00" in prompt
+    assert prompt.count("row r") == 12

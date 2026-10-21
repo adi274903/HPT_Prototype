@@ -53,7 +53,7 @@ class MedGemmaEngine:
 
         output = self.pipe(
             text=messages,
-            max_new_tokens=config.max_new_tokens(),
+            max_new_tokens=config.max_new_tokens("categorize"),
             do_sample=False,
         )
 
@@ -75,7 +75,7 @@ class MedGemmaEngine:
 
         output = self.pipe(
             messages,
-            max_new_tokens=config.max_new_tokens(),
+            max_new_tokens=config.max_new_tokens("decide"),
             do_sample=False,
             return_full_text=True,
         )
@@ -107,7 +107,7 @@ class MedGemmaEngine:
 
         output_ = self.pipe(
             text=messages,
-            max_new_tokens=config.max_new_tokens(),
+            max_new_tokens=config.max_new_tokens("answer"),
             do_sample=False,
         )
 
