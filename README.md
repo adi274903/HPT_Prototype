@@ -129,7 +129,9 @@ file.
 
 `PT_MEDGEMMA_MODEL`, `PT_EMBED_MODEL`, `PT_CPT_COLLECTION`,
 `PT_HCPCS_COLLECTION`, `PT_MAX_CANDIDATES`, `PT_CANDIDATE_TEXT_LIMIT` and
-`PT_MAX_NEW_TOKENS` are also honoured; see `.env.example`.
+`PT_MAX_NEW_TOKENS` are also honoured; see `.env.example`. Per-step token
+budgets are sized from each prompt (`prompt_tokens * factor + slack`, floored
+and capped) — set `PT_MAX_NEW_TOKENS_<STEP>` to pin one step instead.
 
 If you only use the module constants (`config.TOP_K`, `config.MRF_CSV_PATH`, …)
 rather than calling the pipeline, call `config.refresh()` after your own

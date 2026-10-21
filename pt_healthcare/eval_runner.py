@@ -549,6 +549,8 @@ class Runner:
     retrieve_family: str = "both"
 
     def run_case(self, case: Mapping[str, Any], target: Mapping[str, Any]) -> Dict[str, Any]:
+        from . import config
+
         query = str(case["eval_query"])
         truth_codes_mrf = {str(code) for code in case.get("ground_truth_code_MRF") or []}
         truth_codes_all = {str(code) for code in case.get("ground_truth_codes") or []}
@@ -562,7 +564,9 @@ class Runner:
         }
 
         # 1. intent -----------------------------------------------------------
-        intent_completion = self.client.complete(build_intent_prompt(query), max_tokens=64)
+        intent_prompt = build_intent_prompt(query)
+        intent_completion = self.client.complete(
+            intent_prompt, max_tokens=config.max_new_tokens("intent", intent_prompt))
         record["latency_ms"]["intent"] = intent_completion.latency_ms
         if intent_completion.error:
             record["errors"].append("intent: " + intent_completion.error)
@@ -573,7 +577,9 @@ class Runner:
         record["intent_pred"] = predicted_intent
 
         # 2. entity extraction ------------------------------------------------
-        extraction = self.client.complete(build_categorizer_prompt(query), max_tokens=256)
+        extraction_prompt = build_categorizer_prompt(query)
+        extraction = self.client.complete(
+            extraction_prompt, max_tokens=config.max_new_tokens("categorize", extraction_prompt))
         record["latency_ms"]["extract"] = extraction.latency_ms
         if extraction.error:
             record["errors"].append("extract: " + extraction.error)
@@ -605,7 +611,9 @@ class Runner:
         decision_context = {"medical": categorized["medical"], "hospital": categorized["hospital"],
                             "insurer": categorized["insurer"], "medication": categorized["medication"],
                             "cpt_candidates": candidate_cpt, "hcpcs_candidates": candidate_hcpcs}
-        decision = self.client.complete(build_decision_prompt(decision_context, query), max_tokens=256)
+        decision_prompt = build_decision_prompt(decision_context, query)
+        decision = self.client.complete(
+            decision_prompt, max_tokens=config.max_new_tokens("decide", decision_prompt))
         record["latency_ms"]["decide"] = decision.latency_ms
         if decision.error:
             record["errors"].append("decide: " + decision.error)
@@ -632,8 +640,9 @@ class Runner:
         # 6. answer -----------------------------------------------------------
         answer_input = {"rows": rows[:10], "filters_used": {"codes": predicted_codes,
                                                            "hospitals": hospitals, "insurers": insurers}}
-        answer = self.client.complete(build_answer_prompt(query, {"cpt_list": predicted_codes}, answer_input),
-                                      max_tokens=400)
+        answer_prompt = build_answer_prompt(query, {"cpt_list": predicted_codes}, answer_input)
+        answer = self.client.complete(
+            answer_prompt, max_tokens=config.max_new_tokens("answer", answer_prompt))
         record["latency_ms"]["answer"] = answer.latency_ms
         if answer.error:
             record["errors"].append("answer: " + answer.error)

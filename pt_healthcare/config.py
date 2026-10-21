@@ -14,7 +14,7 @@ convenience, but they are a snapshot — take them at import, or call
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # .env discovery
@@ -92,7 +92,6 @@ DEFAULT_QDRANT_PATH = "New_PT_DB"
 DEFAULT_MRF_CSV = "everyUPMCmrf_clean.csv"
 DEFAULT_MAX_CANDIDATES = 8
 DEFAULT_CANDIDATE_TEXT_LIMIT = 120
-DEFAULT_MAX_NEW_TOKENS = 4096
 
 #: Seconds to wait for one completion from an OpenAI-compatible server. A 4B
 #: thinking model that spends 400 tokens on <unused94>thought is slow unbatched.
@@ -166,30 +165,67 @@ def candidate_text_limit() -> int:
     return _get_int("PT_CANDIDATE_TEXT_LIMIT", DEFAULT_CANDIDATE_TEXT_LIMIT)
 
 
-#: Token budget per step. The single global default is 4096, and MedGemma is a
-#: thinking model: it can spend the whole budget on ``<unused94>thought`` before the
-#: JSON exists, which is where the UI's latency went. Each of these is generous for
-#: the step's real output plus a thought block, and each is overridable
-#: (``PT_MAX_NEW_TOKENS_CATEGORIZE`` / ``_DECIDE`` / ``_ANSWER``).
-DEFAULT_STEP_TOKENS: Dict[str, int] = {
-    "categorize": 768,
-    "decide": 1536,
-    "answer": 1024,
+#: Token budget per step. MedGemma is a thinking model: it spends the budget on
+#: its ``<unused94>thought`` block *before* any JSON or prose exists, and that block
+#: restates the input — the decision step walks the candidate list one code at a
+#: time. A fixed per-step constant is therefore the wrong shape: 512 cut
+#: "colonoscopy" mid-candidate, and 1536 cut it again on a longer candidate list.
+#:
+#: The budget is sized from the prompt instead:
+#:
+#:     budget = prompt_tokens * thought_factor + output_slack
+#:
+#: floored at the step's minimum (so a tiny prompt still gets room) and capped
+#: by ``max_new_tokens_cap()`` so a pathological prompt cannot run away.
+#: Tokens are estimated at 4 characters each, so this works before any
+#: tokenizer is loaded. Each entry is ``(thought_factor, output_slack, floor)``.
+#:
+#: ``PT_MAX_NEW_TOKENS_<STEP>`` pins a step to a constant (the escape hatch if
+#: the formula misbehaves on your model); ``PT_MAX_NEW_TOKENS`` raises the cap.
+DEFAULT_STEP_TOKENS: Dict[str, Tuple[float, int, int]] = {
+    "intent": (2.0, 256, 512),
+    "categorize": (2.0, 384, 768),
+    "decide": (3.0, 768, 1536),
+    "answer": (1.5, 768, 1024),
 }
 
+#: Nothing generates past this many tokens unless ``PT_MAX_NEW_TOKENS`` says so.
+DEFAULT_TOKEN_CAP = 4096
 
-def max_new_tokens(step: str = "") -> int:
-    """The generation budget, per step when a step name is given.
 
-    ``PT_MAX_NEW_TOKENS`` still sets the fallback for an unnamed step, so an
-    existing ``.env`` keeps working.
+def max_new_tokens_cap() -> int:
+    """The ceiling on any single generation."""
+    return _get_int("PT_MAX_NEW_TOKENS", DEFAULT_TOKEN_CAP)
+
+
+def max_new_tokens(step: str = "", prompt: str = "") -> int:
+    """The generation budget — dynamic in the prompt, pinned by env if set.
+
+    ``PT_MAX_NEW_TOKENS_<STEP>`` pins the step outright. Otherwise a prompt
+    given here sizes the budget from its own length (see
+    ``DEFAULT_STEP_TOKENS``); with no prompt, the step's floor is returned, so
+    a call that cannot estimate keeps a sane bound. An unnamed step returns the
+    cap, which keeps an existing ``PT_MAX_NEW_TOKENS`` ``.env`` behaving as
+    before.
     """
-    if step:
-        name = step.strip().upper()
-        default = DEFAULT_STEP_TOKENS.get(step.strip().lower(),
-                                          _get_int("PT_MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS))
-        return _get_int(f"PT_MAX_NEW_TOKENS_{name}", default)
-    return _get_int("PT_MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS)
+    name = (step or "").strip().lower()
+
+    if name:
+        pinned = _get_int(f"PT_MAX_NEW_TOKENS_{name.upper()}", 0)
+        if pinned:
+            return pinned
+
+    if name in DEFAULT_STEP_TOKENS:
+        thought_factor, output_slack, floor = DEFAULT_STEP_TOKENS[name]
+
+        if prompt:
+            prompt_tokens = max(1, len(prompt)) // 4
+            wanted = int(prompt_tokens * thought_factor) + output_slack
+            return max(floor, min(wanted, max_new_tokens_cap()))
+
+        return floor
+
+    return max_new_tokens_cap()
 
 
 def llm_backend() -> str:

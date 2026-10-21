@@ -67,13 +67,54 @@ def test_every_model_call_sets_an_explicit_token_budget():
     source = inspect.getsource(MedGemmaEngine)
 
     for step in ("categorize", "decide", "answer"):
-        assert f'max_new_tokens=config.max_new_tokens("{step}")' in source, (
-            f"{step} must pass its own budget, not the shared 4096 default"
+        assert f'max_new_tokens=config.max_new_tokens("{step}", prompt)' in source, (
+            f"{step} must size its budget from its own prompt"
         )
-    # Bounded, but still room for a thought block plus the JSON.
+
+
+def test_the_budget_scales_with_the_prompt_and_stays_capped():
+    """Fixed budgets are the wrong shape for a thinking model.
+
+    The <unused94>thought block restates the input — the decision step walks the
+    candidate list one code at a time — so a longer prompt needs a longer budget.
+    512 cut "colonoscopy" mid-candidate and 1536 cut it again with more
+    candidates; neither could survive an arbitrarily long candidate list.
+    """
+    from pt_healthcare import config
+
+    short = config.max_new_tokens("decide", "colonoscopy")
+    long_prompt = config.max_new_tokens("decide", "colonoscopy " * 500)
+    assert short < long_prompt, "budget must grow with the prompt"
+
+    # Capped: no prompt can ask for more than the ceiling.
+    assert long_prompt == config.max_new_tokens_cap()
+    assert long_prompt <= config.max_new_tokens_cap() <= 4096
+
+    # Floors: an empty prompt still gets room for a thought block plus the JSON.
     assert 256 < config.max_new_tokens("categorize") <= 1024
-    assert 128 < config.max_new_tokens("decide") <= 2048
-    assert config.max_new_tokens("answer") <= 2048
+    assert 1024 <= config.max_new_tokens("decide") <= 2048
+    assert 512 <= config.max_new_tokens("answer") <= 2048
+
+    # The observed failure: 16 candidates truncated at 1536. A full candidate
+    # list must clear that.
+    from pt_healthcare.prompts import build_decision_prompt
+
+    full = {"medical": ["colonoscopy"], "hospital": [], "insurer": [], "medication": [],
+            "cpt_candidates": [{"code": f"453{i}", "text": "x" * 120, "score": 0.9}
+                               for i in range(8)],
+            "hcpcs_candidates": [{"code": f"G01{i}", "text": "y" * 120, "score": 0.8}
+                                 for i in range(8)]}
+    prompt = build_decision_prompt(full, "colonoscopy")
+    assert config.max_new_tokens("decide", prompt) > 1536
+
+    # An env pin is the escape hatch and beats the formula.
+    import os
+
+    os.environ["PT_MAX_NEW_TOKENS_DECIDE"] = "123"
+    try:
+        assert config.max_new_tokens("decide", "colonoscopy " * 500) == 123
+    finally:
+        del os.environ["PT_MAX_NEW_TOKENS_DECIDE"]
 
 
 def test_categorizer_prompt_is_unchanged_without_known_values():
