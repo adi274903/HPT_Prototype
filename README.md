@@ -191,6 +191,40 @@ the HF token from the environment, a `.env`, or Colab secrets
 (`HUGGINGFACE_API_KEY`). Every path can be overridden — see
 `python colab_run.py --help`.
 
+## Faster inference backend
+
+The notebook's default path loads 8 GB of bfloat16 weights and runs a 4B model
+through `transformers.generate`. Point `PT_LLM_BASE_URL` at an OpenAI-compatible
+server and `load_models()` returns a shim instead — same call shape, same prompts,
+no weights in the notebook:
+
+```python
+from pt_healthcare.backend import start_vllm, use
+use(start_vllm("google/medgemma-1.5-4b-it"))   # !pip install -q vllm first
+pipeline = colab_run.setup(mount=False, stage=False)
+```
+
+vLLM is the Colab route (one install, paged KV cache, CUDA graphs). On a smaller
+card — or with no GPU at all — use llama.cpp and a quantised GGUF:
+
+```python
+from pt_healthcare.backend import start_llama_server, use
+use(start_llama_server("/content/models/medgemma-1.5-4b-it-Q4_K_M.gguf",
+                       llama_server="/content/llama.cpp/build/bin/llama-server",
+                       n_gpu_layers=99))
+```
+
+`start_*` blocks until the server answers `/v1/models` and reports the log tail if
+it does not come up; `stop()` shuts down whatever it started. Any server that
+speaks `/v1/chat/completions` works (vLLM, llama-server, TGI, Ollama, LM Studio).
+Leaving `PT_LLM_BASE_URL` unset keeps the transformers path unchanged.
+
+Measured on MedGemma 1.5 4B Q8_0 under `llama-server`, CPU only (16 threads, no
+GPU): the categorizer answers in 14–50 s depending on how much `<unused94>thought`
+it spends, at ~4.5 tok/s generation. A GPU turns that into a couple of seconds.
+The shim is covered by `tests/test_api_pipe.py` (12 cases, fake server) and was
+run end-to-end against the real GGUF.
+
 ## Run
 
 ```bash
