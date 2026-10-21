@@ -173,7 +173,7 @@ def candidate_text_limit() -> int:
 #: (``PT_MAX_NEW_TOKENS_CATEGORIZE`` / ``_DECIDE`` / ``_ANSWER``).
 DEFAULT_STEP_TOKENS: Dict[str, int] = {
     "categorize": 768,
-    "decide": 512,
+    "decide": 1536,
     "answer": 1024,
 }
 

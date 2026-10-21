@@ -72,7 +72,7 @@ def test_every_model_call_sets_an_explicit_token_budget():
         )
     # Bounded, but still room for a thought block plus the JSON.
     assert 256 < config.max_new_tokens("categorize") <= 1024
-    assert 128 < config.max_new_tokens("decide") <= 1024
+    assert 128 < config.max_new_tokens("decide") <= 2048
     assert config.max_new_tokens("answer") <= 2048
 
 
