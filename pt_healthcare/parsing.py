@@ -66,6 +66,15 @@ def split_reasoning(raw_output: Any) -> tuple[str, str]:
     return "", _tidy(_ANY_CONTROL.sub("", text))
 
 
+def strip_thought(raw_output: Any) -> str:
+    """The answer text with any ``<unused94>thought … <unused95>`` block removed.
+
+    Kept for the orchestrator path, which predates :func:`split_reasoning` and only
+    ever wanted the answer half. One implementation, two callers.
+    """
+    return split_reasoning(raw_output)[1]
+
+
 def parse_json_output(raw_output: Any) -> Dict[str, Any]:
     """Extract and parse one JSON object from an LLM response.
 
