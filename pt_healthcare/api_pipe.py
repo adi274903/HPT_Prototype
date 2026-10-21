@@ -1,23 +1,16 @@
-"""An OpenAI-compatible chat backend, shaped like the transformers pipeline.
+"""An OpenAI-compatible server as the generator — the optional ``remote`` backend.
+
+The two in-process routes live in :mod:`pt_healthcare.backends`. This one exists
+for the case where someone else runs the box: ``PT_LLM_BACKEND=remote`` plus
+``PT_LLM_BASE_URL`` and the pipeline talks to ``POST /v1/chat/completions``
+(vLLM, llama-server, TGI, Ollama, LM Studio, SGLang).
 
 ``MedGemmaEngine`` only ever does this::
 
     out = self.pipe(text=messages, max_new_tokens=N, do_sample=False)
     return out[0]["generated_text"][-1]["content"]
 
-so anything that returns that list-of-one-dict can stand in for the in-process
-``image-text-to-text`` pipeline. A server speaking ``POST /v1/chat/completions``
-can: vLLM, llama.cpp's ``llama-server``, TGI, Ollama, LM Studio, SGLang.
-
-Why bother: the notebook path loads 8 GB of bfloat16 weights and pays python
-overhead on every token. A 4-bit/8-bit GGUF on llama.cpp, or vLLM with paged
-attention, is several times faster on the same GPU and fits a smaller one.
-
-    export PT_LLM_BASE_URL=http://127.0.0.1:8080/v1
-    python colab_run.py "How much is a diagnostic mammogram at UPMC Presbyterian?"
-
-``load_models()`` then skips MedGemma entirely and returns this shim, so the
-retrieval stand-ins (embeddings, Qdrant) still load normally.
+so a server that returns the chat shape can stand in for the in-process pipeline.
 """
 
 from __future__ import annotations
@@ -27,6 +20,8 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+from .backends import to_openai_messages
 
 from . import config
 
@@ -55,25 +50,6 @@ def _flatten(content: Any) -> str:
         return "".join(parts)
     return str(content)
 
-
-def to_openai_messages(messages: Any) -> List[Dict[str, str]]:
-    """Normalise the engine's messages (or a bare string) to the OpenAI shape."""
-    if isinstance(messages, str):
-        return [{"role": "user", "content": messages}]
-    out: List[Dict[str, str]] = []
-    for msg in messages or []:
-        if not isinstance(msg, Mapping):
-            out.append({"role": "user", "content": _flatten(msg)})
-            continue
-        role = str(msg.get("role") or "user")
-        # The transformers chat template seeds the assistant turn; the server
-        # does that itself, and a trailing empty assistant turn confuses vLLM.
-        if role == "assistant" and not msg.get("content"):
-            continue
-        out.append({"role": role, "content": _flatten(msg.get("content"))})
-    if not out:
-        raise ValueError("no messages to send")
-    return out
 
 
 class OpenAICompatPipe:
