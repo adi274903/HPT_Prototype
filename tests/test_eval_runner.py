@@ -399,7 +399,9 @@ def test_the_catalog_comes_from_qdrant_not_the_csv(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "qdrant_client", module)
     (tmp_path / "meta.json").write_text("{}")  # find_qdrant_dir only trusts a real store
 
-    catalog = eval_runner.resolve_catalog(qdrant_path=tmp_path)
+    # The store reader itself: resolve_catalog() prefers the shipped artifact now, so
+    # this exercises the Qdrant path directly rather than through the ordering.
+    catalog = eval_runner.catalog_from_qdrant(tmp_path)
 
     assert catalog["CPT"]["77065"].startswith("Diagnostic mammography")
     assert catalog["HCPCS"]["G0204"].startswith("Diagnostic mammography")
