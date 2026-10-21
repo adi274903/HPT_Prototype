@@ -449,3 +449,31 @@ def test_the_shipped_catalog_needs_no_store_and_no_downloads():
     assert len(catalog["CPT"]) > 15000
     assert len(catalog["HCPCS"]) > 13000
     assert catalog["CPT"]["77065"].startswith("Diagnostic mammography")
+
+
+def test_the_qdrant_retriever_loads_only_the_embedder(monkeypatch):
+    """A GPU already holds the 4B generator in vLLM; retrieval must not load a second."""
+    import pt_healthcare.data as data
+    import pt_healthcare.models as models
+    import pt_healthcare.retrieval as retrieval
+    from pt_healthcare.eval_runner import EmbeddingRetriever
+
+    seen = {}
+
+    monkeypatch.setattr(models, "load_embedder", lambda: "embedder")
+
+    def explode(*args, **kwargs):
+        raise AssertionError("load_models() would load the full generator")
+
+    monkeypatch.setattr(models, "load_models", explode)
+    monkeypatch.setattr(data, "get_qdrant_client", lambda path=None: ("client", path))
+
+    class Stub:
+        def __init__(self, embed_model, client, top_k=10):
+            seen["args"] = (embed_model, client, top_k)
+
+    monkeypatch.setattr(retrieval, "CodeRetriever", Stub)
+
+    EmbeddingRetriever(qdrant_path="/store", top_k=7)
+
+    assert seen["args"] == ("embedder", ("client", "/store"), 7)
