@@ -215,3 +215,35 @@ def test_frame_pricer_matches_duckdb():
 
     rates, _cash = FramePricer(frame, ids).keyed_rates(ids)
     assert rates == expected
+
+
+# ---------------------------------------------------------------------------
+# A decision salvaged from a truncated thought block is still a real decision
+# ---------------------------------------------------------------------------
+def test_a_salvaged_decision_is_recorded_but_does_not_touch_the_key():
+    case = {
+        "eval_id": "77065_000001_A1",
+        "eval_query": "mammogram at UPMC Passavant",
+        "ground_truth_codes": ["77065"],
+        "ground_truth_code_MRF": ["77065"],
+        "ground_truth_row_ids": ["12345"],
+        "ground_truth_hospital_name": "UPMC Passavant",
+        "ground_truth_insurance_provider": "Highmark BCBS",
+    }
+    before = dict(case)
+    result = {
+        "output": {"use_codes": "cpt", "cpt_list": ["77065"], "hcpcs_list": []},
+        "decision_recovered": True,
+        "decision_error": "Could not find a JSON object in the model response.",
+        "code_plausible": {"matches": [], "match_count": 0, "filters_used": {}},
+        "categorized": {"medical": ["mammogram"]},
+        "answer": "There is a price.",
+        "total_seconds": 1.0,
+    }
+
+    row = generate_row(case, result, calls=[])
+
+    assert row["generate_decision_recovered"] is True
+    assert "generate_decision_recovered" in GENERATED_COLUMNS
+    assert case == before                      # the key is copied, never edited
+    assert row["generate_cpt"] == ["77065"]

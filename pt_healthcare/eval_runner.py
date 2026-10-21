@@ -943,6 +943,10 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
             # Empty generation is an infrastructure failure, not a model miss; without this
             # the run reads as "the model scored 0" when in fact nothing was generated.
             "generation_error_cases": sum(1 for record in records if record.get("errors")),
+            # A decision salvaged from a truncated thought block is still a real
+            # decision; a run that had to salvage many of them is not the same run.
+            "decisions_recovered": sum(1 for record in records
+                                       if record.get("decision_recovered")),
             "generation_errors": _error_counts(records),
             "parse_failures_by_step": {
                 step: sum(1 for record in records if step in record["parse_failures"])
@@ -1040,6 +1044,10 @@ def format_report(report: Mapping[str, Any]) -> str:
     lines.append("OPS")
     lines.append(f"  cases with a parse failure: {pct(report['ops']['parse_failure_rate'])}")
     lines.append(f"  by step: {report['ops']['parse_failures_by_step']}")
+    if report["ops"].get("decisions_recovered"):
+        lines.append(f"  RECOVERED {report['ops']['decisions_recovered']} decision(s) from a "
+                     "truncated thought block \u2014 codes were taken from what the model "
+                     "named that retrieval also offered")
     if report["ops"].get("generation_error_cases"):
         lines.append(f"  GENERATION FAILED in {report['ops']['generation_error_cases']} case(s) "
                      "\u2014 not model errors: nothing was produced at all:")

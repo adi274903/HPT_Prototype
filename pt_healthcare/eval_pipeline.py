@@ -66,6 +66,7 @@ GENERATED_COLUMNS: Sequence[str] = (
     "generate_medication",
     "generate_answer",
     "generate_intent",
+    "generate_decision_recovered",
     "generate_seconds",
     "generate_error",
 )
@@ -291,6 +292,7 @@ def generate_row(case: Mapping[str, Any], result: Mapping[str, Any],
         "generate_medication": _as_list(categorized.get("medication")),
         "generate_answer": result.get("answer") or "",
         "generate_intent": result.get("intent") or "",
+        "generate_decision_recovered": bool(result.get("decision_recovered")),
         "generate_seconds": round(float(result.get("total_seconds") or 0.0), 3),
         "generate_error": error or result.get("stopped") or "",
         "generate_calls": [dict(call) for call in calls],
@@ -546,6 +548,9 @@ def score(*, rows: Any, dataset: Optional[Any] = None, db: Optional[Any] = None,
         case = cases[row["eval_id"]]
         record = score_observation(case, targets.get(row["eval_id"], {}),
                                    observation_from_row(row), pricer)
+        # not a model error -- the answer still came out of a real decision, but the
+        # decision was salvaged from a thought block that never emitted its JSON
+        record["decision_recovered"] = bool(row.get("generate_decision_recovered"))
         records.append(record)
         if scores_out:
             path = Path(scores_out)
