@@ -77,7 +77,7 @@ def safe_parse(text: str) -> Dict[str, Any]:
         return parse_json_output(text) if text else {}
     except Exception:  # noqa: BLE001 - the eval must survive a bad generation
         return {}
-INTENT_LABELS = ("price_lookup", "hospital_comparison", "cash_vs_insurance")
+INTENT_LABELS = ("price", "lookup", "explain")
 AMOUNT_RX = re.compile(r"\$\s?([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
 TOLERANCE = 0.005  # half a cent: "equal to the cent", not "close enough"
 ROW_STRATA = (("1", lambda n: n == 1), ("2-4", lambda n: 2 <= n <= 4),
@@ -137,6 +137,20 @@ def reciprocal_rank(ranked: Sequence[str], truth: Set[str]) -> Optional[float]:
         if code in truth:
             return 1.0 / position
     return 0.0 if truth else None
+
+
+def parse_intent(text: str) -> str:
+    """Read the router's answer: one word, optionally dressed up in JSON or prose."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r'"intent"\s*:\s*"([a-z_]+)"', raw)
+    if match:
+        return match.group(1).casefold()
+    for token in re.findall(r"[a-zA-Z_]+", raw.casefold()):
+        if token in INTENT_LABELS:
+            return token
+    return ""
 
 
 def amounts(text: str) -> List[float]:
@@ -407,8 +421,7 @@ class Runner:
         # 1. intent -----------------------------------------------------------
         intent_completion = self.client.complete(build_intent_prompt(query), max_tokens=64)
         record["latency_ms"]["intent"] = intent_completion.latency_ms
-        intent_parsed = safe_parse(intent_completion.text)
-        predicted_intent = str(intent_parsed.get("intent", "")).strip()
+        predicted_intent = parse_intent(intent_completion.text)
         if predicted_intent not in INTENT_LABELS:
             record["parse_failures"].append("intent")
             predicted_intent = "invalid"

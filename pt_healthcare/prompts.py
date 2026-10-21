@@ -82,48 +82,26 @@ def build_categorizer_prompt(user_query: str) -> str:
 
 
 def build_intent_prompt(user_query: str) -> str:
-    """Classify what the patient is asking for: one of three labels.
+    """Route a patient question to one of the tools.
 
-    The pipeline's ordinary flow has no intent stage — ``sql_answer`` filters and
-    the answer prompt writes prose. Evaluation needs the label, so it is asked for
-    explicitly and scored on its own. Keeping the three labels disjoint is what
-    makes the metric meaningful: ``hospital_comparison`` and ``cash_vs_insurance``
-    are the only questions whose correct answer is not a single number.
+    Only used when the lexical cues find nothing — this is the tie-breaker, not
+    the router.
     """
-    return f"""You are a healthcare-query intent classifier.
+    return f"""Route a patient's question to one of three capabilities.
 
-    Classify the user's query into exactly one of three labels:
+    price   - what something will cost, what a bill means, what an amount covers,
+              for a named hospital, plan or procedure.
+    lookup  - the meaning of a specific billing code (CPT or HCPCS) that the
+              question itself names, such as "what is 45378".
+    explain - what a procedure, test or condition is, in general terms, when no
+              code is named and no cost is asked about.
 
-    - "price_lookup": the patient wants to know what one service costs, at a named
-      or unnamed place. Asking which hospital to use, or whether something is
-      covered, is still a price_lookup.
-    - "hospital_comparison": the patient wants two named hospitals compared on
-      price for the same service.
-    - "cash_vs_insurance": the patient wants the self-pay (discounted cash) price
-      compared with their insured negotiated rate.
+    Answer with exactly one word: price, lookup or explain. Do not explain your
+    choice.
 
-    Return ONLY valid JSON, no explanation, no Markdown:
-    {{"intent": "price_lookup"}}
+    Question: {user_query}
 
-    Examples:
-
-    Query: How much is a colonoscopy at UPMC Presbyterian with UPMC Health Plan?
-    Output: {{"intent": "price_lookup"}}
-
-    Query: Is Upmc Altoona or Upmc Hamot cheaper for an MRI on Aetna?
-    Output: {{"intent": "hospital_comparison"}}
-
-    Query: Should I pay cash or use my Highmark plan for a knee scope at Upmc Magee?
-    Output: {{"intent": "cash_vs_insurance"}}
-
-    Now classify this query:
-
-    Query: {user_query}
-
-    JSON:
-    """
-
-
+    Answer:"""
 def build_decision_prompt(categorization: Mapping[str, Any], user_query: str) -> str:
     """Ask MedGemma to choose a small set of CPT/HCPCS code candidates.
 

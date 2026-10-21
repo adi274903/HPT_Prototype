@@ -92,23 +92,23 @@ class Stub:
         target = self.targets[eval_id]
         index = self.ordinal(eval_id)
 
-        if "intent classifier" in prompt:
+        if "Route a patient's question" in prompt:
             label = str(target["intent"])
             if index % ERROR_EVERY["intent_wrong"] == 0:
-                others = [value for value in ("price_lookup", "hospital_comparison", "cash_vs_insurance")
-                          if value != label]
+                others = [value for value in ("price", "lookup", "explain") if value != label]
                 label = others[index % len(others)]
-            return json.dumps({"intent": label})
+            return label
 
-        if "entity extractor" in prompt:
+        if "CPT candidates:" in prompt:
+            return self.decide(prompt, case, index)
+
+        # the extractor is the only prompt that asks for these four keys
+        if '"medication"' in prompt and '"hospital"' in prompt:
             entities = {field: [item["text"] for item in target["entities"][field]]
                         for field in ("medical", "hospital", "insurer", "medication")}
             if index % ERROR_EVERY["insurer_drop"] == 0:
                 entities["insurer"] = []
             return json.dumps(entities)
-
-        if prompt.startswith("Select billing-code candidates"):
-            return self.decide(prompt, case, index)
 
         if "healthcare navigation assistant" in prompt:
             return self.answer(case, target, index)

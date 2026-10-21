@@ -35,8 +35,12 @@ for _candidate in (_HERE, _HERE.parent / "eval"):
 from aliases import INVENTED_SERVICES, PAYER_ALIASES  # noqa: E402
 from categories import CATEGORIES, load_catalog  # noqa: E402
 
-INTENT_BY_SUBTYPE = {"C1": "hospital_comparison", "C2": "cash_vs_insurance"}
-INTENT_DEFAULT = "price_lookup"
+# The published router (pt_healthcare/router.py) labels three capabilities. Every
+# case in the 600 asks what something costs, so the expected label is "price"
+# throughout; the map exists so a routing set (E1 code lookup, E2 general
+# explanation) scores without touching this file.
+INTENT_BY_SUBTYPE: Dict[str, str] = {"E1": "lookup", "E2": "explain"}
+INTENT_DEFAULT = "price"
 FIELD_ORDER = ("medical", "hospital", "insurer", "medication")
 ARTICLE_RX = re.compile(r"^(?:a|an|the|my)\s+", re.IGNORECASE)
 
@@ -189,7 +193,7 @@ def build(dataset_dir: Path, db: Path) -> Tuple[List[Dict[str, object]], Dict[st
         targets.append({
             "eval_id": eval_id,
             "subtype": subtype,
-            "intent": INTENT_BY_SUBTYPE.get(subtype, INTENT_DEFAULT),
+            "intent": INTENT_BY_SUBTYPE.get(subtype[:2], INTENT_DEFAULT),
             "use_codes": "none" if subtype == "D2" else (
                 CATEGORIES[category].family.lower() if category in CATEGORIES else "cpt"),
             "n_rows_gt": len(case.get("ground_truth_row_ids") or []),

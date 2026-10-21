@@ -130,10 +130,14 @@ def test_targets_agree_with_the_dataset_ground_truth():
     assert audit["multi_hospital"] == 60, "only the C1 comparison cases name two hospitals"
     assert audit["medical_withheld"] == 12, "only the 12 B1 service-withheld cases have no service"
 
+    # Every case in this set asks what something costs, so the router's expected
+    # label is "price" throughout. That makes the intent number a false-positive
+    # test (a cost question must never route to lookup or explain), not a
+    # three-way F1 — proving the other two labels needs a routing set.
     intents: dict = {}
     for record in targets:
         intents[record["intent"]] = intents.get(record["intent"], 0) + 1
-    assert intents == {"price_lookup": 480, "hospital_comparison": 60, "cash_vs_insurance": 60}
+    assert intents == {"price": 600}
 
     medication = [record for record in targets if record["canonical"]["medication"]]
     assert len(medication) == 54, "the insulin cases are the only ones with a medication entity"
