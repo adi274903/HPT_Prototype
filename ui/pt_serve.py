@@ -39,10 +39,12 @@ import socket
 import threading
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import parse_qs
 
 __all__ = ["launch", "serve", "render", "build_static_html", "to_payload", "ServerHandle"]
 
@@ -555,11 +557,27 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "mode": "live", **self.meta})
             return
 
+        if path == "/api/last":
+            self._json(last_run() or {"state": "none"})
+            return
+
+        if path == "/api/poll":
+            params = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            run_id = (params.get("run") or [""])[0]
+            try:
+                since = int((params.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            snapshot = poll_run(run_id, since)
+            if snapshot is None:
+                self._json({"error": "unknown run"}, 404)
+                return
+            self._json(snapshot)
+            return
+
         if path == "/api/stream":
             query = ""
             if "?" in self.path:
-                from urllib.parse import parse_qs
-
                 query = (parse_qs(self.path.split("?", 1)[1]).get("q") or [""])[0]
             self._stream(query)
             return
@@ -567,7 +585,24 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found", "text/plain")
 
     def do_POST(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        path = self.path.split("?")[0].rstrip("/") or "/"
+
+        if path == "/api/run":
+            try:
+                length = int(self.headers.get("content-length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                payload = {}
+            query = str(payload.get("query") or "")
+            if not query.strip():
+                self._json({"error": "empty query"}, 400)
+                return
+            if self.runner is None:
+                self._json({"error": "server not initialised"}, 500)
+                return
+            self._json({"run": start_run(self.runner, query), "state": "running"})
+            return
+
         if path != "/api/query":
             self._send(404, b"not found", "text/plain")
             return
@@ -662,6 +697,139 @@ class _Handler(BaseHTTPRequestHandler):
                 self._sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
             except Exception:
                 pass
+
+
+# ── Run registry ────────────────────────────────────────────────────────────
+# The dashboard and the patient page both ask `/api/run`, then poll
+# `/api/poll`. Keeping runs here (not in one connection) is what lets "How it
+# works" show the run that was started a page over, instead of booting blank.
+
+_RUNS: dict[str, dict] = {}
+_RUN_LOCK = threading.Lock()
+_RUN_GATE = threading.Lock()  # one pipeline at a time: the models are not reentrant
+_RUN_TTL = 30 * 60
+_RUN_KEEP = 20
+
+
+def _purge_runs() -> None:
+    """Drop finished runs that are old, then trim to the newest few."""
+    now = time.time()
+    for rid, rec in list(_RUNS.items()):
+        if rec["state"] != "running" and now - rec["started"] > _RUN_TTL:
+            _RUNS.pop(rid, None)
+    if len(_RUNS) > _RUN_KEEP:
+        finished = sorted(
+            (r for r in _RUNS.items() if r[1]["state"] != "running"),
+            key=lambda kv: kv[1]["started"],
+        )
+        for rid, _ in finished[: len(_RUNS) - _RUN_KEEP]:
+            _RUNS.pop(rid, None)
+
+
+def start_run(runner: Any, query: str) -> str:
+    """Begin a pipeline run in the background; returns its id."""
+    run_id = uuid.uuid4().hex[:12]
+    rec = {
+        "id": run_id,
+        "query": query,
+        "lines": [],
+        "state": "running",
+        "result": None,
+        "error": None,
+        "started": time.time(),
+    }
+    with _RUN_LOCK:
+        _purge_runs()
+        _RUNS[run_id] = rec
+
+    def sink(line: str) -> None:
+        with _RUN_LOCK:
+            rec["lines"].append(line)
+
+    def work() -> None:
+        try:
+            with _RUN_GATE:
+                result, log, elapsed, error = runner.run(query, sink)
+            with _RUN_LOCK:
+                if error is not None:
+                    rec["state"] = "error"
+                    rec["error"] = f"{type(error).__name__}: {error}"
+                else:
+                    rec["result"] = to_payload(
+                        query=query, result=result, run_log=log, total_seconds=elapsed
+                    )
+                    rec["state"] = "done"
+        except Exception as exc:  # never leave a run polling forever
+            with _RUN_LOCK:
+                rec["state"] = "error"
+                rec["error"] = f"{type(exc).__name__}: {exc}"
+
+    threading.Thread(target=work, name=f"pt-run-{run_id}", daemon=True).start()
+    return run_id
+
+
+def _run_snapshot(rec: dict, since: int) -> dict:
+    """The poll contract: every stage each time, plus only the new log lines."""
+    log = "\n".join(rec["lines"])
+
+    if rec["state"] == "done" and rec["result"] is not None:
+        stages = rec["result"].get("stages") or _stages_from_log(log)
+    else:
+        stages = [dict(s) for s in _stages_from_log(log)]
+        if rec["state"] == "error":
+            for stage in stages:
+                if stage["state"] in ("active", "pending"):
+                    stage["state"] = "error"
+        elif rec["state"] == "running" and not any(
+            s["state"] == "active" for s in stages
+        ):
+            # Between a step finishing and the next log line, the rail would
+            # otherwise show nothing spinning. The run is live: the next step
+            # is where it is working.
+            for stage in stages:
+                if stage["state"] == "pending":
+                    stage["state"] = "active"
+                    break
+
+    out: dict[str, Any] = {
+        "run": rec["id"],
+        "state": rec["state"],
+        "stages": stages,
+        "lines": rec["lines"][since:],
+        "next": len(rec["lines"]),
+    }
+
+    if rec["state"] == "running":
+        # Whatever the log has revealed so far, so codes and counts land early.
+        try:
+            out["partial"] = to_payload(query=rec["query"], result={}, run_log=log)
+        except Exception:
+            pass
+    elif rec["state"] == "done":
+        out["result"] = rec["result"]
+    else:
+        out["error"] = rec["error"]
+
+    return out
+
+
+def poll_run(run_id: str, since: int) -> dict | None:
+    with _RUN_LOCK:
+        rec = _RUNS.get(run_id)
+        if rec is None:
+            return None
+        return _run_snapshot(rec, max(0, since))
+
+
+def last_run() -> dict | None:
+    """The most recently started run, for a page that just loaded."""
+    with _RUN_LOCK:
+        if not _RUNS:
+            return None
+        rec = max(_RUNS.values(), key=lambda r: r["started"])
+        snap = _run_snapshot(rec, max(0, len(rec["lines"]) - 400))
+        # The client continues from `next`; the suffix above is only for display.
+        return snap
 
 
 def serve(
