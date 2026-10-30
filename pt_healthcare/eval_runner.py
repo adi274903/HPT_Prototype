@@ -365,6 +365,36 @@ class VLLMInProcessClient:
                               error=f"{type(exc).__name__}: {exc}")
 
 
+    def complete_batch(self, requests: Sequence[Tuple[str, Optional[int]]]) -> List[Completion]:
+        """All prompts in one ``llm.chat`` call: vLLM schedules them together."""
+        from vllm import SamplingParams
+
+        started = time.perf_counter()
+        try:
+            outputs = self.llm.chat(
+                messages=[[{"role": "user", "content": prompt}] for prompt, _ in requests],
+                sampling_params=[SamplingParams(max_tokens=max_tokens or self.max_tokens,
+                                                temperature=self.temperature, seed=self.seed)
+                                 for _, max_tokens in requests],
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back so one bad prompt cannot sink the batch
+            if len(requests) == 1:
+                return [Completion(text="", prompt_tokens=0, completion_tokens=0,
+                                   latency_ms=(time.perf_counter() - started) * 1000,
+                                   error=f"{type(exc).__name__}: {exc}")]
+            return [self.complete(prompt, max_tokens=max_tokens) for prompt, max_tokens in requests]
+        elapsed = (time.perf_counter() - started) * 1000 / max(1, len(requests))
+        completions = []
+        for out in outputs:
+            prompt_tokens = len(out.prompt_token_ids or [])
+            completion_tokens = len(out.outputs[0].token_ids or [])
+            self.tokens_in += prompt_tokens
+            self.tokens_out += completion_tokens
+            completions.append(Completion(text=out.outputs[0].text or "", prompt_tokens=prompt_tokens,
+                                          completion_tokens=completion_tokens, latency_ms=elapsed))
+        return completions
+
+
 class LlamaCppClient:
     """``llama_cpp.Llama`` in this process — the CPU-or-GPU fallback, also no server."""
 
@@ -540,6 +570,14 @@ class Pricer:
 # ---------------------------------------------------------------------------
 
 
+def complete_many(client: Any, requests: Sequence[Tuple[str, Optional[int]]]) -> List[Completion]:
+    """One batched call when the client has ``complete_batch``, else one by one."""
+    batch = getattr(client, "complete_batch", None)
+    if batch is not None:
+        return list(batch(requests))
+    return [client.complete(prompt, max_tokens=max_tokens) for prompt, max_tokens in requests]
+
+
 @dataclass
 class Runner:
     client: ChatClient
@@ -549,6 +587,42 @@ class Runner:
     retrieve_family: str = "both"
 
     def run_case(self, case: Mapping[str, Any], target: Mapping[str, Any]) -> Dict[str, Any]:
+        """One case, one generation at a time."""
+        steps = self._case_steps(case, target)
+        try:
+            prompt, max_tokens = next(steps)
+            while True:
+                prompt, max_tokens = steps.send(self.client.complete(prompt, max_tokens=max_tokens))
+        except StopIteration as done:
+            return done.value
+
+    def run_cases(self, pairs: Sequence[Tuple[Mapping[str, Any], Mapping[str, Any]]]) -> List[Dict[str, Any]]:
+        """Many cases in lockstep: every case's next prompt goes out as ONE batch.
+
+        A case is four dependent generations (intent, extract, decide, answer), so
+        batching is across cases: round k sends the k-th prompt of every case at once.
+        """
+        steps = [self._case_steps(case, target) for case, target in pairs]
+        records: List[Optional[Dict[str, Any]]] = [None] * len(steps)
+        pending: Dict[int, Tuple[str, int]] = {}
+        for index, gen in enumerate(steps):
+            try:
+                pending[index] = next(gen)
+            except StopIteration as done:
+                records[index] = done.value
+        while pending:
+            order = list(pending)
+            completions = complete_many(self.client, [pending[i] for i in order])
+            pending = {}
+            for index, completion in zip(order, completions):
+                try:
+                    pending[index] = steps[index].send(completion)
+                except StopIteration as done:
+                    records[index] = done.value
+        return cast(List[Dict[str, Any]], records)
+
+    def _case_steps(self, case: Mapping[str, Any], target: Mapping[str, Any]):
+        """Generator behind run_case: yields (prompt, max_tokens), is sent a Completion."""
         from . import config
 
         query = str(case["eval_query"])
@@ -565,8 +639,8 @@ class Runner:
 
         # 1. intent -----------------------------------------------------------
         intent_prompt = build_intent_prompt(query)
-        intent_completion = self.client.complete(
-            intent_prompt, max_tokens=config.max_new_tokens("intent", intent_prompt))
+        intent_completion = yield (
+            intent_prompt, config.max_new_tokens("intent", intent_prompt))
         record["latency_ms"]["intent"] = intent_completion.latency_ms
         if intent_completion.error:
             record["errors"].append("intent: " + intent_completion.error)
@@ -578,8 +652,8 @@ class Runner:
 
         # 2. entity extraction ------------------------------------------------
         extraction_prompt = build_categorizer_prompt(query)
-        extraction = self.client.complete(
-            extraction_prompt, max_tokens=config.max_new_tokens("categorize", extraction_prompt))
+        extraction = yield (
+            extraction_prompt, config.max_new_tokens("categorize", extraction_prompt))
         record["latency_ms"]["extract"] = extraction.latency_ms
         if extraction.error:
             record["errors"].append("extract: " + extraction.error)
@@ -605,6 +679,12 @@ class Runner:
             "recall_at_k": recall_at_k(ranked, truth_codes_mrf, len(ranked)),
             "mrr": reciprocal_rank(ranked, truth_codes_mrf),
             "n_candidates": len(ranked),
+            "query": medical_text,
+            "candidates": [{"family": family, "rank": rank, "code": item.get("code"),
+                            "description": item.get("description") or item.get("text"),
+                            "score": item.get("score")}
+                           for family, items in (("CPT", candidate_cpt), ("HCPCS", candidate_hcpcs))
+                           for rank, item in enumerate(items, start=1)],
         }
 
         # 4. decision ---------------------------------------------------------
@@ -612,8 +692,8 @@ class Runner:
                             "insurer": categorized["insurer"], "medication": categorized["medication"],
                             "cpt_candidates": candidate_cpt, "hcpcs_candidates": candidate_hcpcs}
         decision_prompt = build_decision_prompt(decision_context, query)
-        decision = self.client.complete(
-            decision_prompt, max_tokens=config.max_new_tokens("decide", decision_prompt))
+        decision = yield (
+            decision_prompt, config.max_new_tokens("decide", decision_prompt))
         record["latency_ms"]["decide"] = decision.latency_ms
         if decision.error:
             record["errors"].append("decide: " + decision.error)
@@ -641,8 +721,8 @@ class Runner:
         answer_input = {"rows": rows[:10], "filters_used": {"codes": predicted_codes,
                                                            "hospitals": hospitals, "insurers": insurers}}
         answer_prompt = build_answer_prompt(query, {"cpt_list": predicted_codes}, answer_input)
-        answer = self.client.complete(
-            answer_prompt, max_tokens=config.max_new_tokens("answer", answer_prompt))
+        answer = yield (
+            answer_prompt, config.max_new_tokens("answer", answer_prompt))
         record["latency_ms"]["answer"] = answer.latency_ms
         if answer.error:
             record["errors"].append("answer: " + answer.error)
@@ -696,6 +776,8 @@ class Runner:
             record["ner"][field_name] = prf1_sets(predicted_set, truth_set)
             record["ner_counts"][field_name] = [len(predicted_set), len(truth_set),
                                                 len(predicted_set & truth_set)]
+        record["raw"] = {"intent": intent_completion.text, "extract": extraction.text,
+                         "decide": decision.text}
         return record
 
 
@@ -1259,6 +1341,7 @@ def evaluate(
     max_tokens: int = 512,
     gpu_memory_utilization: float = 0.90,
     dtype: str = "bfloat16",
+    batch_size: int = 64,
     client: Optional[Any] = None,
     progress: Optional[Any] = print,
 ) -> Dict[str, Any]:
@@ -1339,19 +1422,21 @@ def evaluate(
         done = {str(record.get("eval_id")): record for record in previous if record.get("eval_id")}
         records: List[Dict[str, Any]] = list(done.values())
         with out_path.open("a" if done else "w", encoding="utf-8") as handle:
-            for index, case in enumerate(cases, start=1):
-                if str(case["eval_id"]) in done:
+            todo = [(index, case) for index, case in enumerate(cases, start=1)
+                    if str(case["eval_id"]) not in done]
+            if progress:
+                progress(f"{len(cases) - len(todo)} cached, {len(todo)} to run, batch_size={batch_size}")
+            for start in range(0, len(todo), max(1, batch_size)):
+                chunk = todo[start:start + max(1, batch_size)]
+                results = runner.run_cases([(case, targets[case["eval_id"]]) for _, case in chunk])
+                for (index, case), record in zip(chunk, results):
+                    records.append(record)
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                     if progress:
-                        progress(f"[{index}/{len(cases)}] {case['eval_id']} cached")
-                    continue
-                record = runner.run_case(case, targets[case["eval_id"]])
-                records.append(record)
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        progress(f"[{index}/{len(cases)}] {case['eval_id']} "
+                                 f"codes_dice={record['codes']['dice_mrf']} "
+                                 f"rows_dice={record['rows']['dice_raw']} intent={record['intent_pred']}")
                 handle.flush()
-                if progress:
-                    progress(f"[{index}/{len(cases)}] {case['eval_id']} "
-                             f"codes_dice={record['codes']['dice_mrf']} "
-                             f"rows_dice={record['rows']['dice_raw']} intent={record['intent_pred']}")
 
         report = aggregate(records, {
             "backend": backend, "model": model, "base_url": base_url,
@@ -1378,6 +1463,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--n-gpu-layers", type=int, default=-1)
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    parser.add_argument("--batch-size", type=int, default=64,
+                        help="cases generated together per round (vllm batches them)")
     parser.add_argument("--dtype", default="bfloat16",
                         help="vllm weights dtype; a T4 has no bfloat16, use float16")
     parser.add_argument("--dataset", default=None, help="dir with pt_eval_v2.jsonl (auto-detected)")
@@ -1408,6 +1495,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out=args.out, report_path=args.report, device=args.device, gguf=args.gguf,
         n_gpu_layers=args.n_gpu_layers, max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization, dtype=args.dtype,
+        batch_size=args.batch_size,
     )
     print()
     print(format_report(report))

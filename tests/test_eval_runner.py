@@ -477,3 +477,38 @@ def test_the_qdrant_retriever_loads_only_the_embedder(monkeypatch):
     EmbeddingRetriever(qdrant_path="/store", top_k=7)
 
     assert seen["args"] == ("embedder", ("client", "/store"), 7)
+
+
+def test_batched_run_matches_sequential_and_sends_one_call_per_round(tmp_path):
+    from pt_healthcare.eval_runner import Completion, evaluate
+
+    class BatchStub(StubClient):
+        def __init__(self):
+            super().__init__("")
+            self.batches = []
+
+        def complete_batch(self, requests):
+            self.batches.append(len(requests))
+            return [self.complete(prompt, max_tokens=m) for prompt, m in requests]
+
+    dataset = tmp_path / "eval_dataset"
+    dataset.mkdir()
+    for name in ("pt_eval_v2.jsonl", "pt_eval_v2_targets.jsonl"):
+        lines = (DATASET / name).read_text().splitlines()[:5]
+        (dataset / name).write_text("\n".join(lines) + "\n")
+    db = _tiny_db(tmp_path / "tiny.duckdb")
+
+    def run(batch_size):
+        client = BatchStub()
+        evaluate(dataset, db=db, client=client, out=tmp_path / f"run{batch_size}.jsonl",
+                 report_path=None, progress=None, batch_size=batch_size)
+        records = [json.loads(line) for line in (tmp_path / f"run{batch_size}.jsonl").read_text().splitlines()]
+        for record in records:
+            record.pop("latency_ms")
+        return client, records
+
+    batched_client, batched = run(5)
+    _, one_by_one = run(1)
+
+    assert batched == one_by_one
+    assert batched_client.batches == [5, 5, 5, 5], "four rounds, every case in each"
