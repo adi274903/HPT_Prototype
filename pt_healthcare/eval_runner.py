@@ -464,7 +464,9 @@ class CatalogRetriever:
             score = sum(idf[token] for token in overlap) / math.sqrt(len(tokens) or 1)
             scored.append((score, code))
         scored.sort(key=lambda pair: (-pair[0], pair[1]))
-        return [{"code": code, "description": self.catalog[family][code], "score": round(score, 6)}
+        # "text" is the key the decision prompt reads; "description" is kept for older callers.
+        return [{"code": code, "text": self.catalog[family][code],
+                 "description": self.catalog[family][code], "score": round(score, 6)}
                 for score, code in scored[:k]]
 
 
@@ -494,9 +496,14 @@ class EmbeddingRetriever:
         frame = self.retriever.retrieve_codes(text, self.collections[family], top_k=k)
         if frame is None or getattr(frame, "empty", True):
             return []
-        return [{key: value for key, value in record.items()
-                 if key in ("code", "description", "score")}
-                for record in frame.to_dict(orient="records")]
+        out = []
+        for record in frame.to_dict(orient="records"):
+            item = {key: value for key, value in record.items()
+                    if key in ("code", "text", "description", "score")}
+            item.setdefault("text", item.get("description", ""))
+            item.setdefault("description", item["text"])
+            out.append(item)
+        return out
 
 
 class Pricer:
@@ -701,9 +708,15 @@ class Runner:
         if not decided:
             record["parse_failures"].append("decide")
         allowed = {item["code"].upper() for item in candidate_cpt + candidate_hcpcs}
-        requested = [str(code).strip().upper()
-                     for code in [*(decided.get("cpt_list") or []), *(decided.get("hcpcs_list") or [])]
-                     if str(code).strip()]
+        def _as_code(value: Any) -> str:
+            # The model sometimes echoes the whole candidate entry instead of its code.
+            if isinstance(value, Mapping):
+                value = next((value[key] for key in value if str(key).lower() == "code"), "")
+            return str(value).strip().upper()
+
+        requested = [code for code in (_as_code(value) for value in
+                                       [*(decided.get("cpt_list") or []), *(decided.get("hcpcs_list") or [])])
+                     if code]
         predicted_codes = sorted({code for code in requested if code in allowed})
         record["hallucinated_codes"] = sorted({code for code in requested if code not in allowed})
         record["codes_pred"] = predicted_codes

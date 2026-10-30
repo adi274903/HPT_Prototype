@@ -512,3 +512,25 @@ def test_batched_run_matches_sequential_and_sends_one_call_per_round(tmp_path):
 
     assert batched == one_by_one
     assert batched_client.batches == [5, 5, 5, 5], "four rounds, every case in each"
+
+
+def test_the_decision_prompt_sees_candidate_text_and_accepts_echoed_entries(tmp_path):
+    from pt_healthcare.eval_runner import CatalogRetriever, evaluate
+
+    item = CatalogRetriever({"CPT": {"77065": "diagnostic mammography unilateral"}}).retrieve(
+        "mammography", "CPT", 3)[0]
+    assert item["text"] == "diagnostic mammography unilateral"
+
+    prompts = []
+
+    class Echo(StubClient):
+        def complete(self, prompt, max_tokens=None):
+            prompts.append(prompt)
+            self.reply = '{"cpt_list": [{"code": "77065", "text": "x", "score": 1}], "hcpcs_list": []}'
+            return super().complete(prompt, max_tokens)
+
+    out = tmp_path / "run.jsonl"
+    evaluate(_one_case(tmp_path), db=_tiny_db(tmp_path / "tiny.duckdb"), client=Echo(), out=out,
+             report_path=None, progress=None)
+    record = json.loads(out.read_text().splitlines()[0])
+    assert record["hallucinated_codes"] == [] or "{" not in str(record["hallucinated_codes"])
