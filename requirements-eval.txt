@@ -1,0 +1,8 @@
+# Everything the 600-case eval needs on Colab, and nothing else.
+# eval_runner uses a lexical retriever and duckdb pricing, so it needs neither
+# torch/transformers (vllm brings its own pinned torch) nor Qdrant.
+# Install in a FRESH runtime: vllm replaces Colab's preinstalled torch.
+vllm
+duckdb>=1.0
+huggingface_hub>=0.24
+python-dotenv>=1.0

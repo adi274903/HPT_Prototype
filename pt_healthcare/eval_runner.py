@@ -1203,7 +1203,7 @@ def resolve_catalog(
 def build_client(backend: str, *, model: str, base_url: str, device: Optional[str] = None,
                  gguf: Optional[str] = None, n_gpu_layers: int = -1,
                  max_model_len: int = 8192, max_tokens: int = 512,
-                 gpu_memory_utilization: float = 0.90) -> Any:
+                 gpu_memory_utilization: float = 0.90, dtype: str = "bfloat16") -> Any:
     """One name in, one ``complete()``-shaped object out.
 
     ``vllm`` and ``llamacpp`` load the weights in this process — no server, no
@@ -1216,7 +1216,7 @@ def build_client(backend: str, *, model: str, base_url: str, device: Optional[st
     if choice == "vllm":
         return VLLMInProcessClient(model=model, max_model_len=max_model_len,
                                    gpu_memory_utilization=gpu_memory_utilization,
-                                   max_tokens=max_tokens)
+                                   dtype=dtype, max_tokens=max_tokens)
     if choice == "llamacpp":
         from . import config
 
@@ -1258,6 +1258,7 @@ def evaluate(
     max_model_len: int = 8192,
     max_tokens: int = 512,
     gpu_memory_utilization: float = 0.90,
+    dtype: str = "bfloat16",
     client: Optional[Any] = None,
     progress: Optional[Any] = print,
 ) -> Dict[str, Any]:
@@ -1276,6 +1277,21 @@ def evaluate(
     already in that file are skipped, so a Colab disconnect costs the cases in
     flight rather than the whole run. ``fresh=True`` starts over.
     """
+    if dataset is not None and Path(dataset).is_file() and Path(dataset).suffix.lower() == ".csv":
+        # A flat CSV (Query, CPT, Hospital, Payer, Plan, Negotiated_rate): derive the
+        # cases and answer keys from the price database, then score as usual.
+        from .csv_dataset import convert
+
+        if not Path(db).exists():
+            raise FileNotFoundError(f"{db} is missing; the CSV's row ids come from it")
+        converted = convert(dataset, db, Path(".cache") / (Path(dataset).stem + "_eval"))
+        if progress:
+            progress(f"{dataset}: {converted['cases']} cases, {len(converted['skipped'])} skipped")
+            for line in converted["skipped"][:20]:
+                progress("  skipped " + line)
+        if not converted["cases"]:
+            raise ValueError(f"no row of {dataset} matched the price database {db}")
+        dataset = converted["out"]
     dataset_dir = find_dataset_dir(dataset)
     cases = load_jsonl(dataset_dir / CASES_FILE)
     targets = {record["eval_id"]: record for record in load_jsonl(find_targets(dataset_dir))}
@@ -1312,7 +1328,8 @@ def evaluate(
             client = build_client(backend, model=model, base_url=base_url, device=device,
                                   gguf=gguf, n_gpu_layers=n_gpu_layers,
                                   max_model_len=max_model_len, max_tokens=max_tokens,
-                                  gpu_memory_utilization=gpu_memory_utilization)
+                                  gpu_memory_utilization=gpu_memory_utilization,
+                                  dtype=dtype)
 
         runner = Runner(client=cast("ChatClient", client), retriever=retriever_object, pricer=pricer,
                         top_k=top_k, retrieve_family=retrieve)
@@ -1361,6 +1378,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--n-gpu-layers", type=int, default=-1)
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    parser.add_argument("--dtype", default="bfloat16",
+                        help="vllm weights dtype; a T4 has no bfloat16, use float16")
     parser.add_argument("--dataset", default=None, help="dir with pt_eval_v2.jsonl (auto-detected)")
     parser.add_argument("--db", default=".cache/mrf_eval.duckdb")
     parser.add_argument("--catalog-dir", default=None, help="dir holding cpt.csv/hcpcs.csv")
@@ -1388,7 +1407,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         per_subtype=args.per_subtype, limit=args.limit, fresh=args.fresh,
         out=args.out, report_path=args.report, device=args.device, gguf=args.gguf,
         n_gpu_layers=args.n_gpu_layers, max_model_len=args.max_model_len,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+        gpu_memory_utilization=args.gpu_memory_utilization, dtype=args.dtype,
     )
     print()
     print(format_report(report))

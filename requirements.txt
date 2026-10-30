@@ -10,3 +10,5 @@ qdrant-client>=1.9
 pandas>=2.0
 numpy>=1.26
 python-dotenv>=1.0
+# eval_runner prices through duckdb (scripts/prepare_eval_mrf.py builds the file).
+duckdb>=1.0
