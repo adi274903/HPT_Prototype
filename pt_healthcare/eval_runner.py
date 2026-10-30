@@ -155,8 +155,17 @@ def recall_at_k(ranked: Sequence[str], truth: Set[str], k: int) -> Optional[floa
     return len(set(ranked[:k]) & truth) / len(truth)
 
 
-def reciprocal_rank(ranked: Sequence[str], truth: Set[str]) -> Optional[float]:
+def reciprocal_rank(ranked: Sequence[str], truth: Set[str],
+                    cutoff: Optional[int] = None) -> Optional[float]:
+    """Reciprocal rank of the first key code, optionally ignoring rank > ``cutoff``.
+
+    ``cutoff=1`` is MRR@1 (did the right code come first); ``cutoff=3`` is MRR@3.
+    A first hit below the cutoff scores 0 -- the same as never hitting -- because
+    the metric is about what a caller would have seen.
+    """
     for position, code in enumerate(ranked, start=1):
+        if cutoff is not None and position > cutoff:
+            break
         if code in truth:
             return 1.0 / position
     return 0.0 if truth else None
@@ -594,6 +603,10 @@ class Runner:
 
         record: Dict[str, Any] = {
             "eval_id": case["eval_id"], "subtype": target.get("subtype"),
+            # which prompt variant produced the case (A1 named | code). Optional:
+            # a targets file written before variants existed scores the same, it
+            # just cannot be split apart in the report.
+            "variant": target.get("variant"),
             "intent_target": target.get("intent"), "n_rows_gt": len(truth_rows),
             "n_codes_gt": len(truth_codes_mrf),
             "parse_failures": [], "errors": [], "latency_ms": {},
@@ -640,6 +653,8 @@ class Runner:
         record["retrieval"] = {
             "recall_at_k": recall_at_k(ranked, truth_codes_mrf, len(ranked)),
             "mrr": reciprocal_rank(ranked, truth_codes_mrf),
+            "mrr_1": reciprocal_rank(ranked, truth_codes_mrf, 1),
+            "mrr_3": reciprocal_rank(ranked, truth_codes_mrf, 3),
             "n_candidates": len(ranked),
         }
 
@@ -723,6 +738,10 @@ def score_observation(case: Mapping[str, Any], target: Mapping[str, Any],
 
         record: Dict[str, Any] = {
             "eval_id": case["eval_id"], "subtype": target.get("subtype"),
+            # which prompt variant produced the case (A1 named | code). Optional:
+            # a targets file written before variants existed scores the same, it
+            # just cannot be split apart in the report.
+            "variant": target.get("variant"),
             "intent_target": target.get("intent"), "n_rows_gt": len(truth_rows),
             "n_codes_gt": len(truth_codes_mrf),
             "intent_pred": obs.intent,
@@ -735,6 +754,8 @@ def score_observation(case: Mapping[str, Any], target: Mapping[str, Any],
             "parse_failures": list(obs.parse_failures), "errors": list(obs.errors),
             "retrieval": {"recall_at_k": recall_at_k(ranked, truth_codes_mrf, len(ranked)),
                           "mrr": reciprocal_rank(ranked, truth_codes_mrf),
+                          "mrr_1": reciprocal_rank(ranked, truth_codes_mrf, 1),
+                          "mrr_3": reciprocal_rank(ranked, truth_codes_mrf, 3),
                           "n_candidates": len(ranked)},
         }
         if obs.extra:
@@ -856,6 +877,26 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
                                "dice_raw": mean(record["rows"]["dice_raw"] for record in subset),
                                "jaccard_raw": mean(record["rows"]["jaccard_raw"] for record in subset)}
 
+    # A question that names its own code is keyed to that code alone; one that only
+    # names the service is keyed to the whole clinical family. Averaging the two lets
+    # the easy half carry the number, so everything that depends on the code key is
+    # also reported split by the variant that produced the case.
+    variant_block: Dict[str, Dict[str, Any]] = {}
+    variants_present = sorted({str(record["variant"]) for record in records if record.get("variant")})
+    for variant in variants_present:
+        subset = [record for record in records if str(record.get("variant") or "") == variant]
+        scored = [record for record in subset if record["codes"]["dice_mrf"] is not None]
+        variant_block[variant] = {
+            "n": len(subset),
+            "dice_mrf": mean(record["codes"]["dice_mrf"] for record in scored),
+            "jaccard_mrf": mean(record["codes"]["jaccard_mrf"] for record in scored),
+            "pivot_hit_rate": ratio(sum(1 for record in subset if record["codes"]["pivot_hit"]),
+                                    len(subset)),
+            "mrr": mean(record["retrieval"]["mrr"] for record in subset),
+            "mrr_1": mean(record["retrieval"]["mrr_1"] for record in subset),
+            "mrr_3": mean(record["retrieval"]["mrr_3"] for record in subset),
+        }
+
     ner_block: Dict[str, Dict[str, Optional[float]]] = {}
     for field_name in FIELD_ORDER:
         precision_values = [record["ner"][field_name][0] for record in records]
@@ -945,8 +986,12 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
         "retrieval": {
             "recall_at_k": mean(record["retrieval"]["recall_at_k"] for record in records),
             "mrr": mean(record["retrieval"]["mrr"] for record in records),
+            "mrr_1": mean(record["retrieval"]["mrr_1"] for record in records),
+            "mrr_3": mean(record["retrieval"]["mrr_3"] for record in records),
             "mean_candidates": mean([float(record["retrieval"]["n_candidates"]) for record in records]),
         },
+        # only populated when the targets file carries a variant; see above
+        "variants": variant_block,
         "ops": {
             "parse_failure_rate": ratio(sum(1 for record in records if record["parse_failures"]), len(records)),
             # Empty generation is an infrastructure failure, not a model miss; without this
@@ -1049,7 +1094,18 @@ def format_report(report: Mapping[str, Any]) -> str:
     lines.append("RETRIEVAL")
     lines.append(f"  recall@k : {pct(report['retrieval']['recall_at_k'])}")
     lines.append(f"  MRR      : {num(report['retrieval']['mrr'])}")
+    lines.append(f"  MRR@1    : {num(report['retrieval'].get('mrr_1'))}")
+    lines.append(f"  MRR@3    : {num(report['retrieval'].get('mrr_3'))}")
     lines.append("")
+    variants = report.get("variants") or {}
+    if variants:
+        lines.append("BY PROMPT VARIANT  (a question that names its own code is keyed to that code alone)")
+        lines.append(f"  {'variant':<22} n     Dice_MRF  pivot hit    MRR   MRR@1   MRR@3")
+        for variant, block in variants.items():
+            lines.append(f"  {variant:<22} {block['n']:>4}  {num(block['dice_mrf']):>8}  "
+                         f"{pct(block['pivot_hit_rate']):>9}  {num(block['mrr']):>5}  "
+                         f"{num(block['mrr_1']):>5}  {num(block['mrr_3']):>5}")
+        lines.append("")
     lines.append("OPS")
     lines.append(f"  cases with a parse failure: {pct(report['ops']['parse_failure_rate'])}")
     lines.append(f"  by step: {report['ops']['parse_failures_by_step']}")

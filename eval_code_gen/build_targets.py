@@ -194,6 +194,11 @@ def build(dataset_dir: Path, db: Path) -> Tuple[List[Dict[str, object]], Dict[st
             "eval_id": eval_id,
             "subtype": subtype,
             "intent": INTENT_BY_SUBTYPE.get(subtype[:2], INTENT_DEFAULT),
+            # Which prompt variant produced the case (A1 named | code, B3 lay | clinical).
+            # It is additive: the seven answer keys are untouched, but a case that names
+            # its own code scores differently from one that does not, and averaging them
+            # would flatter the easy half.
+            "variant": record.get("variant"),
             "use_codes": "none" if subtype == "D2" else (
                 CATEGORIES[category].family.lower() if category in CATEGORIES else "cpt"),
             "n_rows_gt": len(case.get("ground_truth_row_ids") or []),

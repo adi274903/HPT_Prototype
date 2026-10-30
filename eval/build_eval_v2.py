@@ -44,7 +44,8 @@ SUBTYPES = ("A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "D1", "D2")
 SET_OF = {"A1": "S1", "B1": "S1", "B2": "S1", "B3": "S1",
           "A2": "S2", "A3": "S2", "C1": "S3", "C2": "S3", "D1": "D", "D2": "D"}
 ROW_CAP = 50
-GENERATOR_VERSION = "v2.0.0"
+# v2.1.0: an A1 question that names its code is keyed to that code alone
+GENERATOR_VERSION = "v2.1.0"
 CODE_RX = re.compile(r"^(?:\d{5}|\d{4}[A-Z]|[A-Z]\d{4})$")
 STOPWORDS = {"with", "without", "and", "the", "for", "per", "each", "visit",
              "session", "hour", "protocol", "using", "under"}
@@ -239,6 +240,15 @@ class Builder:
         # D2 is a service that does not exist, so it has no accepted code at all
         full_codes = [] if subtype == "D2" else self.codes_full[category]
         mrf_codes = [] if subtype == "D2" else self.codes_mrf[category]
+        # A question that names its code verbatim is answered by that code alone:
+        # "CPT 43239" is not asking for the whole EGD family, and the row ids below
+        # are already resolved from the pivot alone, so a category-wide key here
+        # would let code-Dice and row-Dice disagree on the same case.
+        if subtype == "A1" and re.search(rf"(?<!\w){re.escape(pivot)}(?!\w)", query):
+            if pivot in full_codes:
+                full_codes = [pivot]
+            if pivot in mrf_codes:
+                mrf_codes = [pivot]
         case = {
             "eval_id": eval_id,
             "eval_query": query,
@@ -315,9 +325,12 @@ class Builder:
                 rng=self.rng,
             )
         else:  # explicit code
+            # Level II drug codes are HCPCS, not CPT -- saying "CPT J1815" teaches
+            # the wrong vocabulary for a code the catalog files under HCPCS.
+            system = "HCPCS" if not code[0].isdigit() else "CPT"
             query = pick(
-                f"My doctor's order says CPT {code} for {lay} at {hospital}. My plan is {payer} {plan}. What did they agree on?",
-                f"CPT {code}, {lay}, at {hospital}, billed to {payer} {plan} — what is the negotiated amount?",
+                f"My doctor's order says {system} {code} for {lay} at {hospital}. My plan is {payer} {plan}. What did they agree on?",
+                f"{system} {code}, {lay}, at {hospital}, billed to {payer} {plan} — what is the negotiated amount?",
                 rng=self.rng,
             )
 

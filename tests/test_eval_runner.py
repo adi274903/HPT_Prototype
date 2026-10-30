@@ -81,6 +81,21 @@ def test_recall_at_k_and_reciprocal_rank():
     assert reciprocal_rank(ranked, set()) is None
 
 
+def test_mrr_cutoffs_score_a_late_hit_as_zero():
+    """MRR@1 and MRR@3 are what a caller would have seen, so a hit below the
+    cutoff counts the same as no hit at all -- 0, not a small credit."""
+    ranked = ["x", "y", "z"]
+    assert reciprocal_rank(ranked, {"x"}, 1) == 1.0
+    assert reciprocal_rank(ranked, {"y"}, 1) == 0.0
+    assert reciprocal_rank(ranked, {"y"}, 3) == pytest.approx(1 / 2)
+    assert reciprocal_rank(ranked, {"z"}, 3) == pytest.approx(1 / 3)
+    assert reciprocal_rank(ranked, {"q"}, 3) == 0.0
+    # no cutoff and cutoff past the end are the same metric
+    assert reciprocal_rank(ranked, {"z"}, 3) == reciprocal_rank(ranked, {"z"})
+    # an empty key is unmeasurable, not a miss, at every cutoff
+    assert reciprocal_rank(ranked, set(), 1) is None
+
+
 def test_amount_extraction_handles_commas_and_cents():
     assert amounts("the rate is $1,234.56, cash $900") == [1234.56, 900.0]
     assert amounts("no figure here") == []
@@ -208,6 +223,22 @@ def test_evaluate_returns_the_report_and_scores_a_case(tmp_path):
     assert report["codes"]["dice_mrf"] == 0.0, "an empty answer scores zero, not perfect"
     assert client.calls == 4, "intent, extract, decide, answer"
     assert len((tmp_path / "run.jsonl").read_text().splitlines()) == 1
+    assert {"mrr", "mrr_1", "mrr_3"} <= set(report["retrieval"])
+
+
+def test_the_report_splits_the_code_key_by_prompt_variant(tmp_path):
+    """A question that names its own code is keyed to that code alone, so it must
+    not be averaged with the cases that are keyed to a whole clinical family."""
+    from pt_healthcare.eval_runner import evaluate
+
+    report = evaluate(_one_case(tmp_path), db=_tiny_db(tmp_path / "tiny.duckdb"),
+                      client=StubClient(""), out=tmp_path / "variant_run.jsonl",
+                      report_path=None, progress=None)
+
+    variants = report["variants"]
+    assert set(variants) == {"named"}, variants  # the shipped case is a named-service A1
+    assert variants["named"]["n"] == 1
+    assert {"n", "dice_mrf", "pivot_hit_rate", "mrr", "mrr_1", "mrr_3"} <= set(variants["named"])
 
 
 def test_evaluate_resumes_instead_of_regenerating(tmp_path):

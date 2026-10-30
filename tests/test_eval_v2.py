@@ -223,13 +223,58 @@ def test_d2_services_appear_in_no_description(cases, meta, con):
 
 # ── specific knowns from the source data ────────────────────────────────────
 def test_colonoscopy_split_is_the_verified_one(cases):
-    """31 curated codes, 28 of them present in the MRF (44397/44406/44407 are not)."""
+    """31 curated codes, 28 of them present in the MRF (44397/44406/44407 are not).
+
+    A question that states its own code is keyed to that code alone, so it is
+    checked against the family key it names instead.
+    """
     colon = [c for c in cases if "45378" in c["ground_truth_codes"]]
     assert colon
-    for case in colon:
+    wide = [c for c in colon if len(c["ground_truth_codes"]) > 1]
+    for case in wide:
         assert len(case["ground_truth_codes"]) == 31, case["eval_id"]
         assert len(case["ground_truth_code_MRF"]) == 28, case["eval_id"]
         assert not {"44397", "44406", "44407"} & set(case["ground_truth_code_MRF"])
+
+    named = [c for c in colon if c["eval_id"].endswith("_A1")
+             and "CPT 45378" in c["eval_query"]]
+    assert named, "the explicit-code colonoscopy case went missing"
+    for case in named:
+        assert case["ground_truth_codes"] == ["45378"], case["eval_id"]
+
+
+def test_a_question_that_names_its_code_is_keyed_to_that_code(cases):
+    """An A1 question stating a code verbatim is answered by that code alone.
+
+    The row ids have always been resolved from the pivot alone, so a category-wide
+    key here would let code-Dice and row-Dice disagree about the same case. A1 is
+    the only subtype that ever names a code, which is what makes the family key
+    correct everywhere else.
+    """
+    code_rx = re.compile(r"\b(?:\d{5}|[A-Z]\d{4})\b")
+    named = [case for case in cases if case["eval_id"].endswith("_A1")
+             and code_rx.search(case["eval_query"])]
+    assert named, "no A1 case states its own code -- this rule would go untested"
+    for case in named:
+        pivot = case["eval_id"].split("_")[0]
+        match = code_rx.search(case["eval_query"])
+        assert match is not None and match.group(0) == pivot, case["eval_id"]
+        assert case["ground_truth_codes"] == [pivot], case["eval_id"]
+        assert case["ground_truth_code_MRF"] == [pivot], case["eval_id"]
+
+    stray = [case["eval_id"] for case in cases if not case["eval_id"].endswith("_A1")
+             and code_rx.search(case["eval_query"])]
+    assert not stray, f"only A1 may name a code in the query: {stray[:5]}"
+
+
+def test_a_level_ii_code_is_never_labelled_cpt(cases):
+    """``CPT J1815`` teaches the wrong vocabulary: a J-code is HCPCS Level II."""
+    for case in cases:
+        code = case["eval_id"].split("_")[0]
+        if not re.match(r"^[A-Z]\d{4}$", code):
+            continue
+        if "CPT" in case["eval_query"] and code in case["eval_query"]:
+            pytest.fail(f"{case['eval_id']} calls a Level II code CPT: {case['eval_query'][:80]}")
 
 
 def test_c1_keys_the_cheaper_hospital_minimum(cases, meta):
