@@ -534,3 +534,137 @@ def test_the_decision_prompt_sees_candidate_text_and_accepts_echoed_entries(tmp_
              report_path=None, progress=None)
     record = json.loads(out.read_text().splitlines()[0])
     assert record["hallucinated_codes"] == [] or "{" not in str(record["hallucinated_codes"])
+
+
+# ---------------------------------------------------------------------------
+# a question that names its code must be able to retrieve that code
+# ---------------------------------------------------------------------------
+
+
+def _named_code_db(path: Path, code: str = "27130") -> Path:
+    """A tiny database holding one priced row for ``code``."""
+    import duckdb
+
+    con = duckdb.connect(str(path))
+    con.execute("CREATE TABLE rows_ext (row_id VARCHAR, hospital VARCHAR, payer VARCHAR,"
+                " plan VARCHAR, setting VARCHAR, cpt VARCHAR, hcpcs VARCHAR,"
+                " rate DOUBLE, cash DOUBLE)")
+    con.execute("INSERT INTO rows_ext VALUES ('r1', 'UPMC Presbyterian', 'UPMC Health Plan',"
+                " 'P', 'outpatient', ?, NULL, 133.0, 150.0)", [code])
+    con.execute("CREATE TABLE code_hospital AS SELECT hospital FROM rows_ext")
+    con.execute("CREATE TABLE combos AS SELECT payer FROM rows_ext")
+    con.close()
+    return path
+
+
+def _code_naming_case(tmp_path: Path) -> Path:
+    """One case whose question names CPT 27130 and describes nothing."""
+    dataset = tmp_path / "eval_dataset"
+    dataset.mkdir()
+    eval_id = "27130_000001_A1"
+    case = {
+        "eval_id": eval_id,
+        "eval_query": "What is the price for CPT 27130 at UPMC Presbyterian"
+                      " with my UPMC Health Plan plan?",
+        "ground_truth_codes": ["27130"], "ground_truth_code_MRF": ["27130"],
+        "ground_truth_row_ids": ["r1"], "ground_truth_hospital_name": "UPMC Presbyterian",
+        "ground_truth_insurance_provider": "UPMC Health Plan",
+    }
+    target = {"eval_id": eval_id, "subtype": "A1", "intent": "price", "use_codes": "cpt",
+              "n_rows_gt": 1,
+              "entities": {"medical": [], "hospital": [], "insurer": [], "medication": []},
+              "canonical": {"medical": [], "hospital": [], "insurer": [], "medication": []}}
+    (dataset / "pt_eval_v2.jsonl").write_text(json.dumps(case) + "\n")
+    (dataset / "pt_eval_v2_targets.jsonl").write_text(json.dumps(target) + "\n")
+    return dataset
+
+
+class CodeNamingModel(StubClient):
+    """MedGemma as the cpt-only run behaves: it reads the code out of the question."""
+
+    def __init__(self, decide_reply: str = '{"use_codes": "cpt", "cpt_list": ["27130"],'
+                                          ' "hcpcs_list": []}') -> None:
+        super().__init__("")
+        self.decide_reply = decide_reply
+
+    def complete(self, prompt, max_tokens=None):
+        if "Answer with exactly one word" in prompt:
+            self.reply = "price"
+        elif "Select billing-code candidates." in prompt:
+            self.reply = self.decide_reply
+        elif '"medical"' in prompt:
+            self.reply = ('{"medical": ["CPT 27130"], "hospital": ["UPMC Presbyterian"],'
+                          ' "insurer": ["UPMC Health Plan"], "medication": []}')
+        else:
+            self.reply = "It costs $133.00."
+        return super().complete(prompt, max_tokens)
+
+
+def test_family_words_are_not_retrieval_tokens():
+    from pt_healthcare.eval_runner import CatalogRetriever
+
+    # "cpt" occurs inside descriptions ("PTS COUNSL CPT OPT OUT"), so scoring it ranks
+    # noise; a question that says only "CPT 27130" must retrieve nothing by similarity.
+    retriever = CatalogRetriever({"CPT": {"01999": "Unlisted anesthesia procedure",
+                                          "27130": "Total hip arthroplasty"},
+                                  "HCPCS": {"M1317": "PTS COUNSL CPT OPT OUT"}})
+    assert retriever.retrieve("CPT 27130", "CPT", 5) == []
+    assert retriever.retrieve("CPT", "HCPCS", 5) == []
+    assert [item["code"] for item in retriever.retrieve("hip arthroplasty", "CPT", 5)] == ["27130"]
+
+
+def test_codes_named_in_reads_the_question_and_ignores_unknown_codes():
+    from pt_healthcare.eval_runner import codes_named_in
+
+    catalog = {"CPT": {"27130": "Total hip arthroplasty"},
+               "HCPCS": {"G8433": "SCR FOR DEP NOT CPT DOC RSN"}}
+    named = codes_named_in("What is the price for CPT 27130, or HCPCS: G8433, or 99999?", catalog)
+    assert named == {"CPT": ["27130"], "HCPCS": ["G8433"]}
+
+
+def test_a_code_named_in_the_question_reaches_the_decision_step(tmp_path):
+    """The bug: retrieval indexed descriptions, so the named code was never a candidate
+    and the model's correct answer was discarded as unretrieved."""
+    from pt_healthcare.eval_runner import evaluate
+
+    out = tmp_path / "run.jsonl"
+    report = evaluate(_code_naming_case(tmp_path), db=_named_code_db(tmp_path / "tiny.duckdb"),
+                      client=CodeNamingModel(), out=out, report_path=None, progress=None)
+    record = json.loads(out.read_text().splitlines()[0])
+
+    assert record["retrieval"]["seeded"] == ["27130"], "the question named its code"
+    assert record["retrieval"]["candidates"][0]["code"] == "27130", "a seeded code comes first"
+    assert record["retrieval"]["candidates"][0]["seeded"] is True
+    assert record["hallucinated_codes"] == [], "the right answer must not be rejected"
+    assert record["codes_pred"] == ["27130"]
+    assert record["rows_pred"] == ["r1"]
+    assert report["codes"]["dice_mrf"] == 1.0
+    assert report["retrieval"]["cases_with_seeded_code"] == 1
+
+
+def test_a_code_prefixed_with_its_family_still_parses(tmp_path):
+    """The real run also emitted "CPT 27130" inside cpt_list, which missed ``allowed``."""
+    from pt_healthcare.eval_runner import evaluate
+
+    out = tmp_path / "run.jsonl"
+    evaluate(_code_naming_case(tmp_path), db=_named_code_db(tmp_path / "tiny.duckdb"),
+             client=CodeNamingModel(
+                 '{"use_codes": "cpt", "cpt_list": ["CPT 27130"], "hcpcs_list": []}'),
+             out=out, report_path=None, progress=None)
+    record = json.loads(out.read_text().splitlines()[0])
+    assert record["codes_pred"] == ["27130"]
+    assert record["hallucinated_codes"] == []
+
+
+def test_an_unretrieved_code_is_still_rejected(tmp_path):
+    """Seeding must not disable the gate: a code nobody retrieved is still refused."""
+    from pt_healthcare.eval_runner import evaluate
+
+    out = tmp_path / "run.jsonl"
+    evaluate(_code_naming_case(tmp_path), db=_named_code_db(tmp_path / "tiny.duckdb"),
+             client=CodeNamingModel(
+                 '{"use_codes": "cpt", "cpt_list": ["45378"], "hcpcs_list": []}'),
+             out=out, report_path=None, progress=None)
+    record = json.loads(out.read_text().splitlines()[0])
+    assert record["codes_pred"] == []
+    assert record["hallucinated_codes"] == ["45378"], "a code the question never named"
