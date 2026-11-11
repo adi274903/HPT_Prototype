@@ -198,7 +198,9 @@ def compact_candidates(
             {
                 "code": code,
                 "text": str(item.get("text", ""))[:text_limit],
-                "score": round(float(item.get("score", 0.0)), 4),
+                # A candidate can arrive without a score (a code read straight out of
+                # the question is never ranked), so 0.0 rather than a TypeError.
+                "score": round(float(item.get("score") or 0.0), 4),
             }
         )
 

@@ -428,6 +428,45 @@ class LlamaCppClient:
 # ---------------------------------------------------------------------------
 
 
+# Tokens that name a code *family*, not a procedure. "cpt" occurs by accident in
+# descriptions ("PTS COUNSL CPT OPT OUT"), so keeping it turns every question that
+# names a code into a candidate list of noise.
+FAMILY_TOKENS = frozenset({"cpt", "hcpcs"})
+
+# A bare CPT (4-5 digits) or HCPCS (letter + 4 digits) as it appears in a question.
+CODE_PATTERN = re.compile(r"\b([A-Z]\d{4}|\d{4,5})\b", re.IGNORECASE)
+
+
+def codes_named_in(text: str, catalog: Mapping[str, Mapping[str, str]]) -> Dict[str, List[str]]:
+    """Codes the text names explicitly, restricted to codes the catalog knows.
+
+    The catalog maps code -> description, so a question that says "CPT 27130" and a
+    similarity search over descriptions can never meet. Reading the code out of the
+    question is the only way that case can retrieve its own answer.
+    """
+    found: Dict[str, List[str]] = {family: [] for family in catalog}
+    for match in CODE_PATTERN.finditer(text or ""):
+        code = match.group(1).upper()
+        for family, per_code in catalog.items():
+            if code in per_code and code not in found[family]:
+                found[family].append(code)
+    return found
+
+
+def merge_candidates(seeded: Sequence[Dict[str, Any]], found: Sequence[Dict[str, Any]],
+                     k: int) -> List[Dict[str, Any]]:
+    """Seeded codes (named in the question) first, then similarity hits, deduped."""
+    merged: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for item in [*seeded, *found]:
+        code = str(item.get("code", "")).strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        merged.append(item)
+    return merged[:max(1, k)]
+
+
 class CatalogRetriever:
     """Lexical top-k over a catalog — the harness must run without Qdrant.
 
@@ -451,7 +490,10 @@ class CatalogRetriever:
         self.size = {family: max(1, len(self.catalog[family])) for family in self.catalog}
 
     def retrieve(self, text: str, family: str, k: int = 10) -> List[Dict[str, Any]]:
-        query_tokens = set(re.findall(r"[a-z0-9]+", (text or "").casefold()))
+        # The family token itself ("CPT 27130") is not a description word: keeping it
+        # ranks every code whose text happens to contain "CPT" and nothing else.
+        query_tokens = {token for token in re.findall(r"[a-z0-9]+", (text or "").casefold())
+                        if token not in FAMILY_TOKENS}
         if not query_tokens or family not in self.catalog:
             return []
         idf = {token: math.log(1 + self.size[family] / (1 + self.df[family].get(token, 0)))
@@ -592,6 +634,21 @@ class Runner:
     pricer: Pricer
     top_k: int = 10
     retrieve_family: str = "both"
+    # code -> description, used only to read a code named in the question and to
+    # describe it to the decision prompt. Falls back to the retriever's own catalog,
+    # then to the shipped artifact, so an EmbeddingRetriever needs no extra wiring.
+    catalog: Optional[Mapping[str, Mapping[str, str]]] = None
+    _catalog_cache: Optional[Mapping[str, Mapping[str, str]]] = field(
+        default=None, init=False, repr=False)
+
+    def _catalog(self) -> Mapping[str, Mapping[str, str]]:
+        if self._catalog_cache is not None:
+            return self._catalog_cache
+        resolved = self.catalog or getattr(self.retriever, "catalog", None)
+        if not resolved:
+            resolved = catalog_from_dataset() or {}
+        self._catalog_cache = resolved
+        return self._catalog_cache
 
     def run_case(self, case: Mapping[str, Any], target: Mapping[str, Any]) -> Dict[str, Any]:
         """One case, one generation at a time."""
@@ -677,9 +734,26 @@ class Runner:
 
         # 3. retrieval --------------------------------------------------------
         medical_text = " ".join([*categorized["medical"], *categorized["medication"]])
-        candidate_cpt = (self.retriever.retrieve(medical_text, "CPT", self.top_k)
+        # A question that names its code ("CPT 27130") cannot be answered by similarity:
+        # the catalog indexes descriptions, so the named code is never retrieved and the
+        # decision step then rejects the correct answer as unretrieved. Seed it first.
+        catalog = self._catalog()
+        named = codes_named_in(" ".join([query, medical_text]), catalog)
+
+        def _seeded(family: str) -> List[Dict[str, Any]]:
+            texts = catalog.get(family, {})
+            # No "score": these were not ranked by similarity, so inventing 0.0 would
+            # read as a very bad hit instead of no hit at all.
+            return [{"code": code, "text": texts.get(code, ""), "description": texts.get(code, ""),
+                     "seeded": True} for code in named.get(family, [])]
+
+        candidate_cpt = (merge_candidates(_seeded("CPT"),
+                                          self.retriever.retrieve(medical_text, "CPT", self.top_k),
+                                          self.top_k)
                          if self.retrieve_family in ("both", "cpt") else [])
-        candidate_hcpcs = (self.retriever.retrieve(medical_text, "HCPCS", self.top_k)
+        candidate_hcpcs = (merge_candidates(_seeded("HCPCS"),
+                                            self.retriever.retrieve(medical_text, "HCPCS", self.top_k),
+                                            self.top_k)
                            if self.retrieve_family in ("both", "hcpcs") else [])
         ranked = [item["code"] for item in candidate_cpt + candidate_hcpcs]
         record["retrieval"] = {
@@ -687,9 +761,13 @@ class Runner:
             "mrr": reciprocal_rank(ranked, truth_codes_mrf),
             "n_candidates": len(ranked),
             "query": medical_text,
+            # Codes read out of the question rather than found by similarity, so a
+            # report can say which of the two produced a hit.
+            "seeded": [item["code"] for item in candidate_cpt + candidate_hcpcs
+                       if item.get("seeded")],
             "candidates": [{"family": family, "rank": rank, "code": item.get("code"),
                             "description": item.get("description") or item.get("text"),
-                            "score": item.get("score")}
+                            "score": item.get("score"), "seeded": bool(item.get("seeded"))}
                            for family, items in (("CPT", candidate_cpt), ("HCPCS", candidate_hcpcs))
                            for rank, item in enumerate(items, start=1)],
         }
@@ -708,11 +786,14 @@ class Runner:
         if not decided:
             record["parse_failures"].append("decide")
         allowed = {item["code"].upper() for item in candidate_cpt + candidate_hcpcs}
+
         def _as_code(value: Any) -> str:
-            # The model sometimes echoes the whole candidate entry instead of its code.
+            # The model sometimes echoes the whole candidate entry instead of its code,
+            # and sometimes writes the family with it ("CPT 27130", "HCPCS: G8433").
             if isinstance(value, Mapping):
                 value = next((value[key] for key in value if str(key).lower() == "code"), "")
-            return str(value).strip().upper()
+            code = str(value).strip().upper()
+            return re.sub(r"^(?:CPT|HCPCS)\s*[:#.\-]?\s*", "", code)
 
         requested = [code for code in (_as_code(value) for value in
                                        [*(decided.get("cpt_list") or []), *(decided.get("hcpcs_list") or [])])
@@ -958,6 +1039,13 @@ def aggregate(records: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -> 
             "recall_at_k": mean(record["retrieval"]["recall_at_k"] for record in records),
             "mrr": mean(record["retrieval"]["mrr"] for record in records),
             "mean_candidates": mean([float(record["retrieval"]["n_candidates"]) for record in records]),
+            # Codes read out of the question, not found by similarity. A set whose
+            # questions name their code scores mostly on these, so they are reported
+            # separately instead of being folded into recall@k.
+            "cases_with_seeded_code": sum(1 for record in records
+                                          if record["retrieval"].get("seeded")),
+            "seeded_candidates": sum(len(record["retrieval"].get("seeded") or [])
+                                     for record in records),
         },
         "ops": {
             "parse_failure_rate": ratio(sum(1 for record in records if record["parse_failures"]), len(records)),
